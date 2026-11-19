@@ -27,17 +27,23 @@ from faiss.contrib.e_means.base import _resolve_recipe
 from faiss.contrib.e_means.torch_backend import _separate_splits
 from faiss.contrib.e_means.quantizer import CastQuantizer
 from e_means_test_utils import known_torch_centroids
+from e_means_gpu_conditions import amd_triton_gpu, graph_replay_gpu, nvidia_sm80
 
 _DISTRIBUTED_EVIDENCE = []
 
 
+def _nvidia_ready():
+    return nvidia_sm80()
+
+
 def _cuda_ready():
-    return (torch.cuda.is_available() and not torch.version.hip
-            and torch.cuda.get_device_capability() >= (8, 0))
+    # Reduced-precision centered casts run here: NVIDIA SM80+, or an AMD target
+    # family through Triton (arms() drops the native backend on AMD until W7).
+    return nvidia_sm80() or amd_triton_gpu()
 
 
 def _cute_ready():
-    if not _cuda_ready() or torch.cuda.get_device_capability() != (9, 0):
+    if not _nvidia_ready() or torch.cuda.get_device_capability() != (9, 0):
         return False
     try:
         return (importlib.metadata.version("quack-kernels") == "0.6.5"
@@ -212,7 +218,8 @@ class TestCenteredCastCPU(unittest.TestCase):
 
 class _GPUContracts:
     def arms(self):
-        backends = ["native"]
+        # Native FP16/BF16 on ROCm is unverified (W7), so AMD runs Triton only.
+        backends = [] if torch.version.hip is not None else ["native"]
         if importlib.util.find_spec("triton") is not None:
             backends.append("triton")
         return [(backend, dtype) for backend in backends
@@ -306,6 +313,7 @@ class _GPUContracts:
                 with self.assertRaisesRegex(RuntimeError, "frozen"):
                     model.accumulate(codes)
 
+    @unittest.skipUnless(graph_replay_gpu(), "CUDA graph replay required (ROCm: EMEANS_ROCM_GRAPH_REPLAY=1)")
     def test_resident_replay_and_seeded_encoding_parity(self):
         for backend, dtype in self.arms():
             with self.subTest(backend=backend, dtype=dtype):
@@ -392,7 +400,7 @@ class _GPUContracts:
                 self.assertTrue(all(owner() is None for owner in owners + bindings))
 
 
-@unittest.skipUnless(_cuda_ready(), "NVIDIA SM80 or later required")
+@unittest.skipUnless(_cuda_ready(), "NVIDIA SM80+ or AMD target family GPU required")
 class TestCenteredCastCUDA(_GPUContracts, unittest.TestCase):
     pass
 
@@ -495,7 +503,7 @@ def _distributed_worker(rank, rendezvous):
         dist.destroy_process_group()
 
 
-@unittest.skipUnless(_cuda_ready() and torch.cuda.device_count() >= 2,
+@unittest.skipUnless(_nvidia_ready() and torch.cuda.device_count() >= 2,
                      "two NVIDIA SM80 or later devices required")
 class TestCenteredCastDistributed(unittest.TestCase):
     def test_two_rank_original_statistics_dense_sparse(self):

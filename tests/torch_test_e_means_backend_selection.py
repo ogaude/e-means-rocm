@@ -122,6 +122,53 @@ class DefaultCastTest(unittest.TestCase):
             self.assertFalse(e_means_torch._default_cast_supported(X.device, "auto"))
 
 
+class TestSkipConditionsTest(unittest.TestCase):
+    """tests/e_means_gpu_conditions.py: what each GPU test skip means per vendor."""
+
+    def _conditions(self):
+        import e_means_gpu_conditions
+        return e_means_gpu_conditions
+
+    def test_rocm_gfx_capability_is_not_nvidia_sm80(self):
+        c = self._conditions()
+        with amd("gfx1200"), mock.patch.object(torch.cuda, "is_available", return_value=True), \
+             mock.patch.object(torch.cuda, "current_device", return_value=0), \
+             mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)):
+            self.assertFalse(c.nvidia_sm80())
+            self.assertTrue(c.amd_triton_gpu())
+            self.assertTrue(c.triton_gpu())
+
+    def test_rocm_non_target_family(self):
+        c = self._conditions()
+        with amd("gfx90a"), mock.patch.object(torch.cuda, "is_available", return_value=True), \
+             mock.patch.object(torch.cuda, "current_device", return_value=0):
+            self.assertFalse(c.amd_triton_gpu())
+            self.assertFalse(c.triton_gpu())
+
+    def test_nvidia(self):
+        c = self._conditions()
+        with nvidia((8, 0)), mock.patch.object(torch.cuda, "is_available", return_value=True):
+            self.assertTrue(c.nvidia_sm80())
+            self.assertFalse(c.amd_triton_gpu())
+            self.assertTrue(c.graph_replay_gpu())
+        with nvidia((7, 5)), mock.patch.object(torch.cuda, "is_available", return_value=True):
+            self.assertFalse(c.nvidia_sm80())
+
+    def test_graph_replay_condition_on_rocm(self):
+        c = self._conditions()
+        with amd("gfx942"), mock.patch.object(torch.cuda, "is_available", return_value=True):
+            with mock.patch.dict("os.environ", {dp.GRAPH_REPLAY_ENV: "0"}):
+                self.assertFalse(c.graph_replay_gpu())
+            with mock.patch.dict("os.environ", {dp.GRAPH_REPLAY_ENV: "1"}):
+                self.assertTrue(c.graph_replay_gpu())
+
+    def test_no_gpu(self):
+        c = self._conditions()
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            self.assertFalse(c.nvidia_sm80() or c.amd_triton_gpu() or c.triton_gpu()
+                             or c.graph_replay_gpu())
+
+
 class GraphReplayPolicyTest(unittest.TestCase):
 
     def test_nvidia_always_allows_replay(self):

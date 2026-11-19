@@ -29,12 +29,18 @@ from e_means_test_utils import (
     EmeansReferenceContracts, backend_class, native_options, highest_fp32, known_torch_centroids,
 )
 
-TRITON_CUDA = (torch.cuda.is_available() and not torch.version.hip
-               and torch.cuda.get_device_capability() >= (8, 0)
-               and importlib.util.find_spec("triton") is not None)
-FP8_CUDA = (TRITON_CUDA and torch.cuda.get_device_capability()
+from e_means_gpu_conditions import graph_replay_gpu, nvidia_sm80, triton_gpu
+
+# NVIDIA SM80+ with Triton, exactly the upstream condition. FP8 and INT8 stay
+# NVIDIA-only: on ROCm get_device_capability() returns gfx numbers, and AMD
+# FP8/INT8 assignment is not supported before v0.2.
+TRITON_NVIDIA = nvidia_sm80() and importlib.util.find_spec("triton") is not None
+# The Triton backend runs here: NVIDIA SM80+ or an AMD target family.
+TRITON_CUDA = triton_gpu()
+GRAPH_REPLAY = graph_replay_gpu()
+FP8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
             in ((9, 0), (10, 0), (10, 3)))
-INT8_CUDA = (TRITON_CUDA and torch.cuda.get_device_capability()
+INT8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
              in ((8, 0), (9, 0), (10, 0)))
 
 
@@ -400,11 +406,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
             finally:
                 dist.destroy_process_group()
 
-    @unittest.skipUnless(
-        TRITON_CUDA
-        and torch.cuda.get_device_capability() in ((8, 0), (9, 0), (10, 0)),
-        "qualified INT8 CUDA required",
-    )
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_native_byte_exact_distance_output(self):
         from faiss.contrib.e_means.triton_assignment import (
             prepare_int8_centroids,
@@ -2132,8 +2134,12 @@ class NoTriton(importlib.abc.MetaPathFinder):
         if fullname == "triton" or fullname.startswith("triton."):
             raise ImportError("test blocks optional Triton")
 available = importlib.util.find_spec("triton") is not None
-cuda_supported = (torch.cuda.is_available() and not torch.version.hip
-                  and torch.cuda.get_device_capability() >= (8, 0))
+if torch.version.hip is None:
+    cuda_supported = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0)
+else:
+    # AMD target family with Triton (checked by find_spec, so nothing is imported).
+    from faiss.contrib.e_means.device_profile import amd_triton_supported
+    cuda_supported = torch.cuda.is_available() and amd_triton_supported("cuda")
 sys.meta_path.insert(0, NoTriton())
 assert "triton" not in sys.modules
 model = Emeans(1, 1, nepochs=1, batch_size=2, alpha0=0.5)
@@ -2235,7 +2241,7 @@ if cuda_supported:
     def _floating_backends(self):
         return ("native", "triton") if TRITON_CUDA else ("native",)
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_planted_ragged_and_long_assignments(self):
         # Large searches use separated planted winners, not another expanded
         # matmul as a supposedly independent ranking oracle.
@@ -2264,7 +2270,7 @@ if cuda_supported:
                     torch.testing.assert_close(rows, saved, rtol=0, atol=0)
                     self.assertEqual((distance.dtype, labels.dtype), (torch.float32, torch.int64))
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_global_ties_ieee_and_large_half_norms(self):
         for dtype, b, k, d, first, second in (
             (torch.bfloat16, 1025, 257, 65, 3, 130),
@@ -2301,7 +2307,7 @@ if cuda_supported:
             _, labels = self._known_centroids(centroids, assignment_backend="triton").assign(rows)
             self.assertEqual(int(labels[0]), 1)
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_strided_current_stream_and_tensor_device(self):
         current = torch.cuda.current_device()
         device = torch.device("cuda", (current+1) % torch.cuda.device_count())
@@ -2355,7 +2361,7 @@ if cuda_supported:
                     self.assertEqual((distance.device, labels.device), (device, device))
                     self.assertEqual(torch.cuda.current_device(), current)
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_exact_half_lattice_statistics(self):
         # Every partial sum is representable: per-slot absolute 2**-24
         # lattice units are 2**23 and 8, both <=2**24, in any atomic order.
@@ -2387,7 +2393,7 @@ if cuda_supported:
         finally:
             torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_external_statistics_rounding_and_revival(self):
         objective = torch.zeros((), device="cuda", dtype=torch.float64)
         for alpha, zero_mass, value in ((0.5, False, 3.), (1., False, 1e8),
@@ -2486,7 +2492,7 @@ if cuda_supported:
                     model.end_epoch()
                     model.finalize()
 
-    @unittest.skipUnless(TRITON_CUDA, "Triton NVIDIA SM80 required")
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_warmed_streaming_workspace(self):
         for k, seed in ((4097, 321), (16384, 654)):
             with self.subTest(k=k):
@@ -3159,7 +3165,7 @@ if cuda_supported:
                 self.assertTrue(torch.equal(state, after))
                 self.assertTrue(torch.equal(cpu_state, torch.random.get_rng_state()))
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    @unittest.skipUnless(GRAPH_REPLAY, "CUDA graph replay required (ROCm: EMEANS_ROCM_GRAPH_REPLAY=1)")
     def test_cuda_replay_failure_drains_and_fresh_model_recovers(self):
         cases = [(torch.float32, None)]
         if not torch.version.hip and torch.cuda.get_device_capability() >= (8, 0):
@@ -3184,7 +3190,7 @@ if cuda_supported:
             self._check_cuda_replay_failure(torch.uint8, None, "cute")
             self._check_cuda_replay_failure(torch.float32, Int8Quantizer(3), "cute")
 
-    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
+    @unittest.skipUnless(GRAPH_REPLAY, "CUDA graph replay required (ROCm: EMEANS_ROCM_GRAPH_REPLAY=1)")
     def test_replay_accepts_either_fitted_law(self):
         # An explicit throughput recipe at d <= 16, where batch_law="auto"
         # resolves to the quality law, keeps CUDA-graph replay; other manual
@@ -3208,7 +3214,7 @@ if cuda_supported:
                 model.begin(n, x[:k].clone())
                 self.assertEqual(model._replay_eligible(x), expected)
 
-    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
+    @unittest.skipUnless(GRAPH_REPLAY, "CUDA graph replay required (ROCm: EMEANS_ROCM_GRAPH_REPLAY=1)")
     def test_equivalent_replay_preserves_real_assignment_and_step_hooks(self):
         class Inherited(QuantizedEmeans):
             pass
