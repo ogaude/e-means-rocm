@@ -31,7 +31,7 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 |---|---|
 | Kernels | The 10 PTX inline-assembly snippets in the EMA-update, split and FP8-cast kernels are replaced by plain Triton arithmetic. With fusion off it compiles to the same `.rn` instructions on NVIDIA, and to valid code on all four AMD families. |
 | Device detection | New `device_profile.py`: tells NVIDIA from AMD (ROCm reports both as `"cuda"`) and maps AMD chips to a family with its wavefront size, LDS budget and matrix-instruction support. |
-| Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. CuTe and TMA descriptors are never selected on AMD. |
+| Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. The PyTorch backend also handles FP16/BF16 there (`torch.addmm(out_dtype=)`), as explicit `native` or as the fallback without Triton. CuTe and TMA descriptors are never selected on AMD. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
 | Errors | FP8 and INT8 on AMD raise an error that says support is planned. |
 | Tests | Vendor-aware skips replace the blanket ROCm skips; new GPU-free compile tests and bit-level Triton-vs-PyTorch checks. |
@@ -130,7 +130,7 @@ rewrite; see its README.
 | RX 9060 XT runs | done |
 | MI300X runs (gfx942) | next |
 | Per-family tuning (tiles, stages, warps) | needs measurements; FP32 on RX settled (Triton ≥ PyTorch) |
-| Native FP16/BF16 PyTorch fallback on ROCm | `addmm(out_dtype=)` works on gfx1200; to wire up |
+| Native FP16/BF16 PyTorch fallback on ROCm | done; verified on gfx1200 |
 | Multi-GPU | out of scope ("expected to work, untested") |
 
 Acceptance for v0.1: the default `Emeans(d, k).train(x)` uses Triton on gfx1200 and gfx942;

@@ -29,7 +29,7 @@ from e_means_test_utils import (
     EmeansReferenceContracts, backend_class, native_options, highest_fp32, known_torch_centroids,
 )
 
-from e_means_gpu_conditions import graph_replay_gpu, nvidia_sm80, triton_gpu
+from e_means_gpu_conditions import graph_replay_gpu, native_reduced_gpu, nvidia_sm80, triton_gpu
 
 # NVIDIA SM80+ with Triton, exactly the upstream condition. FP8 and INT8 stay
 # NVIDIA-only: on ROCm get_device_capability() returns gfx numbers, and AMD
@@ -38,6 +38,8 @@ TRITON_NVIDIA = nvidia_sm80() and importlib.util.find_spec("triton") is not None
 # The Triton backend runs here: NVIDIA SM80+ or an AMD target family.
 TRITON_CUDA = triton_gpu()
 GRAPH_REPLAY = graph_replay_gpu()
+# Native PyTorch FP16/BF16 assignment: NVIDIA SM80+ or an AMD target family.
+NATIVE_REDUCED = native_reduced_gpu()
 FP8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
             in ((9, 0), (10, 0), (10, 3)))
 INT8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
@@ -2067,8 +2069,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
 
 
 
-    @unittest.skipUnless(torch.cuda.is_available() and not torch.version.hip
-                         and torch.cuda.get_device_capability() >= (8, 0), "NVIDIA SM80 BF16 required")
+    @unittest.skipUnless(NATIVE_REDUCED, "native BF16 GPU required (NVIDIA SM80+ or AMD target family)")
     def test_bf16_default_and_native_opt_out_query_law(self):
         rows = torch.ones((17, 3), dtype=torch.bfloat16, device='cuda')
         initial = torch.tensor([[1., 1., 1.], [0., 0., 0.]], device='cuda')
@@ -2512,13 +2513,8 @@ if cuda_supported:
                 self.assertEqual(labels.shape, (512,))
                 self.assertLess(extra, 512*k*4//4)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() >= (8, 0)
-        and importlib.util.find_spec("triton") is not None,
-        "Triton CUDA required",
-    )
+    @unittest.skipUnless(NATIVE_REDUCED and TRITON_CUDA,
+                         "native FP16/BF16 and Triton GPU required")
     def test_triton_matches_represented_training(self):
         initial = torch.tensor([[0.], [3.]], device="cuda")
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
@@ -2591,12 +2587,7 @@ if cuda_supported:
     def _known_centroids(self, centroids, **kwargs):
         return known_torch_centroids(centroids, **kwargs)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() >= (8, 0),
-        "NVIDIA SM80 required",
-    )
+    @unittest.skipUnless(NATIVE_REDUCED, "native FP16/BF16 GPU required (NVIDIA SM80+ or AMD target family)")
     def test_represented_assignment_norms_ties_and_high_finite(self):
         for backend in self._floating_backends():
             for dtype in (torch.float16, torch.bfloat16):
@@ -2652,12 +2643,7 @@ if cuda_supported:
             torch.testing.assert_close(labels, torch.zeros(2, dtype=torch.int64, device="cuda"), rtol=0, atol=0)
             torch.testing.assert_close(distance, torch.tensor([0., 1.], device="cuda"), rtol=0, atol=0)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() >= (8, 0),
-        "NVIDIA SM80 required",
-    )
+    @unittest.skipUnless(NATIVE_REDUCED, "native FP16/BF16 GPU required (NVIDIA SM80+ or AMD target family)")
     def test_represented_empty_metadata_split_and_range(self):
         for backend in self._floating_backends():
             for dtype in (torch.float16, torch.bfloat16):
@@ -2753,12 +2739,7 @@ if cuda_supported:
             self.assertEqual(model.n_splits, 0)
             rows = torch.zeros((2, 2), device="cuda", dtype=torch.bfloat16)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() >= (8, 0),
-        "NVIDIA SM80 required",
-    )
+    @unittest.skipUnless(NATIVE_REDUCED, "native FP16/BF16 GPU required (NVIDIA SM80+ or AMD target family)")
     def test_native_and_cast_represented_means(self):
         x = torch.tensor([[1.001], [1.002], [3.001], [3.002]], device="cuda")
         mean_initial = torch.tensor([[1.0], [3.0]], device="cuda")

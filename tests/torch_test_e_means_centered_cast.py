@@ -38,7 +38,7 @@ def _nvidia_ready():
 
 def _cuda_ready():
     # Reduced-precision centered casts run here: NVIDIA SM80+, or an AMD target
-    # family through Triton (arms() drops the native backend on AMD until W7).
+    # family with Triton (native FP16/BF16 also runs there; see device_profile).
     return nvidia_sm80() or amd_triton_gpu()
 
 
@@ -218,8 +218,7 @@ class TestCenteredCastCPU(unittest.TestCase):
 
 class _GPUContracts:
     def arms(self):
-        # Native FP16/BF16 on ROCm is unverified (W7), so AMD runs Triton only.
-        backends = [] if torch.version.hip is not None else ["native"]
+        backends = ["native"]
         if importlib.util.find_spec("triton") is not None:
             backends.append("triton")
         return [(backend, dtype) for backend in backends

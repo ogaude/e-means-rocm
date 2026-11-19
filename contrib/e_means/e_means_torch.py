@@ -17,7 +17,8 @@ from .torch_backend import (
     default_chunk_size,
     _separate_splits,
 )
-from .device_profile import amd_triton_supported, graph_replay_supported, is_rocm
+from .device_profile import (
+    amd_native_reduced_supported, amd_triton_supported, graph_replay_supported, is_rocm)
 
 from .base import (
     _EmeansBase,
@@ -47,13 +48,16 @@ __all__ = [
 def _default_cast_supported(device, requested):
     """Whether automatic FP32 -> BF16 casting applies on this CUDA-type device.
 
-    NVIDIA: always, as upstream. AMD (ROCm): only when the Triton backend will run
-    the BF16 assignment, i.e. a target-family GPU with Triton and backend auto or
-    triton. Otherwise AMD input stays FP32 and the native backend runs it.
+    NVIDIA: always, as upstream. AMD (ROCm): when a backend will run the BF16
+    assignment on this device: Triton (auto or triton, target family with Triton) or
+    native PyTorch (native, or auto without Triton, on a target family with
+    addmm(out_dtype=)). Otherwise AMD input stays FP32 and the native backend runs it.
     """
     if not is_rocm():
         return True
-    return requested in ("auto", "triton") and amd_triton_supported(device)
+    if requested in ("auto", "triton") and amd_triton_supported(device):
+        return True
+    return requested in ("auto", "native") and amd_native_reduced_supported(device)
 
 
 def _torch_generator(device, seed):

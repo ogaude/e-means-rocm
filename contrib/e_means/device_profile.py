@@ -166,6 +166,23 @@ def amd_triton_supported(device):
     return device_profile(device).known_amd and triton_available()
 
 
+def addmm_out_dtype_available():
+    """Whether this PyTorch's addmm accepts out_dtype (native FP16/BF16 assignment)."""
+    return "out_dtype" in (torch.addmm.__doc__ or "")
+
+
+def amd_native_reduced_supported(device):
+    """True on ROCm for a target-family GPU whose PyTorch has addmm(out_dtype=).
+
+    Native FP16/BF16 assignment (torch.addmm with out_dtype=float32) is verified on
+    gfx1200 with ROCm 10.1. As on NVIDIA, where it needs SM80+, it is limited to the
+    target families; other AMD GPUs stay on native FP32.
+    """
+    if not is_rocm() or torch.device(device).type != "cuda":
+        return False
+    return device_profile(device).known_amd and addmm_out_dtype_available()
+
+
 AMD_TARGETS = "gfx942, gfx950, gfx11xx or gfx120x"
 
 GRAPH_REPLAY_ENV = "EMEANS_ROCM_GRAPH_REPLAY"

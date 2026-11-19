@@ -11,7 +11,9 @@ selection and capture resources. E-means owns the training state and schedule.
 
 import torch
 
-from .device_profile import AMD_TARGETS, amd_triton_supported, is_rocm, nvidia_capability
+from .device_profile import (
+    AMD_TARGETS, amd_native_reduced_supported, amd_triton_supported, is_rocm,
+    nvidia_capability)
 
 
 def _check_torch_abs_bound(name, bound, *tensors):
@@ -534,7 +536,7 @@ def select_backend(x, dtype, k, d, requested="auto"):
     floating = dtype in (torch.float32, torch.float16, torch.bfloat16)
     native = dtype is torch.float32 or (
         cuda and "out_dtype" in (torch.addmm.__doc__ or "")
-    )
+    ) or (dtype in (torch.float16, torch.bfloat16) and amd_native_reduced_supported(x.device))
     if floating and native:
         return TorchBackend
     if floating and is_rocm():

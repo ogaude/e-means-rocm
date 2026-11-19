@@ -418,8 +418,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   every precision above trains, the e-means tests pass, and Triton is 2.2× to 4× faster than
   PyTorch for BF16 and FP16. MI300 runs are next; MI350 and RX 7000 are compile-checked only.
   Other AMD GPUs (for example MI200, gfx90a) run native FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
-  The same happens on the four families when Triton is not installed: unlike on NVIDIA, the
-  automatic choice then uses PyTorch for FP32 instead of raising an error.
+  On the four families without Triton, the automatic choice uses the slower PyTorch path (BF16 by
+  default, or your data's FP16/BF16/FP32) instead of raising an error as on NVIDIA.
 - ⁵ Refused with an error. INT8 on all four AMD families, and FP8 on MI350 and RX 9000 (the AMD
   GPUs with a native FP8 matrix instruction), are planned.
 - On the CPU, computation remains FP32 (see On the CPU).
@@ -432,8 +432,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - As on NVIDIA, training is not bit-reproducible by default: batch statistics are summed with
   atomic additions, so repeated FP32 runs can end in different clusterings. For identical runs,
   call `torch.use_deterministic_algorithms(True)` (verified on ROCm, eager and replay).
-- With `assignment_backend="native"`, FP32 data stays FP32 on AMD, and FP16/BF16 data through
-  the PyTorch path has not been verified on ROCm yet.
+- `assignment_backend="native"` (PyTorch) handles FP32, FP16 and BF16 on the four families, as on
+  NVIDIA SM80+; it is verified on gfx1200 and 2.2× to 4× slower than Triton for FP16/BF16.
 - Several GPUs (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are untested.
 
 ### Data precision
@@ -570,7 +570,7 @@ python -m unittest discover -s tests -p 'torch_test_e_means*.py'
 The tests need two commands, because Python's default test discovery skips the PyTorch test files.
 
 On AMD GPUs, the same commands run the Triton tests on the four supported families; tests of
-FP8, INT8, CuTe, several GPUs and native FP16/BF16 are skipped. Add `EMEANS_ROCM_GRAPH_REPLAY=1`
+FP8, INT8, CuTe and several GPUs are skipped. Add `EMEANS_ROCM_GRAPH_REPLAY=1`
 to also run the CUDA-graph replay tests. Some tests need no GPU at all: they compile the Triton
 kernels for gfx942, gfx950, gfx1100 and gfx1200 and check the generated code
 (`torch_test_e_means_ptx_free.py`, `torch_test_e_means_amd_fences.py`). To run tests without

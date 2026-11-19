@@ -18,14 +18,15 @@ K, D = 1024, 64
 
 
 @contextmanager
-def amd(arch, triton=True):
+def amd(arch, triton=True, out_dtype=True):
     dp._amd_arch.cache_clear()
     capability = mock.Mock(side_effect=AssertionError("capability queried on AMD"))
     with mock.patch.object(torch.version, "hip", "7.16"), \
          mock.patch.object(torch.cuda, "get_device_properties",
                            return_value=SimpleNamespace(gcnArchName=arch)), \
          mock.patch.object(torch.cuda, "get_device_capability", capability), \
-         mock.patch.object(dp, "triton_available", return_value=triton):
+         mock.patch.object(dp, "triton_available", return_value=triton), \
+         mock.patch.object(dp, "addmm_out_dtype_available", return_value=out_dtype):
         yield
     dp._amd_arch.cache_clear()
 
@@ -59,10 +60,20 @@ class AmdSelectionTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "SM80.*AMD gfx942"):
                     select_backend(X, dtype, K, D)
 
-    def test_missing_triton_falls_back_to_native_fp32(self):
+    def test_missing_triton_falls_back_to_native(self):
         with amd("gfx1200", triton=False):
+            for dtype in (torch.float32, torch.float16, torch.bfloat16):
+                self.assertIs(select_backend(X, dtype, K, D), TorchBackend)
+
+    def test_missing_triton_and_out_dtype_rejects_reduced_precision(self):
+        with amd("gfx1200", triton=False, out_dtype=False):
             self.assertIs(select_backend(X, torch.float32, K, D), TorchBackend)
             with self.assertRaisesRegex(RuntimeError, "Triton installed"):
+                select_backend(X, torch.bfloat16, K, D)
+
+    def test_unknown_family_never_gets_native_reduced_precision(self):
+        with amd("gfx90a", triton=False):
+            with self.assertRaises(RuntimeError):
                 select_backend(X, torch.bfloat16, K, D)
 
     def test_int8_and_fp8_say_planned(self):
@@ -111,15 +122,24 @@ class DefaultCastTest(unittest.TestCase):
             for requested in ("auto", "native", "triton", "cute"):
                 self.assertTrue(e_means_torch._default_cast_supported(X.device, requested))
 
-    def test_amd_casts_only_for_triton(self):
+    def test_amd_casts_when_a_backend_runs_bf16(self):
+        cast = e_means_torch._default_cast_supported
         with amd("gfx1200"):
-            self.assertTrue(e_means_torch._default_cast_supported(X.device, "auto"))
-            self.assertTrue(e_means_torch._default_cast_supported(X.device, "triton"))
-            self.assertFalse(e_means_torch._default_cast_supported(X.device, "native"))
-        with amd("gfx90a"):
-            self.assertFalse(e_means_torch._default_cast_supported(X.device, "auto"))
+            for requested in ("auto", "triton", "native"):
+                self.assertTrue(cast(X.device, requested), requested)
+            self.assertFalse(cast(X.device, "cute"))
         with amd("gfx1200", triton=False):
-            self.assertFalse(e_means_torch._default_cast_supported(X.device, "auto"))
+            self.assertTrue(cast(X.device, "auto"))       # native BF16 fallback
+            self.assertTrue(cast(X.device, "native"))
+            self.assertFalse(cast(X.device, "triton"))
+        with amd("gfx1200", out_dtype=False):
+            self.assertTrue(cast(X.device, "auto"))       # Triton
+            self.assertFalse(cast(X.device, "native"))
+        with amd("gfx1200", triton=False, out_dtype=False):
+            self.assertFalse(cast(X.device, "auto"))
+        with amd("gfx90a"):
+            for requested in ("auto", "triton", "native"):
+                self.assertFalse(cast(X.device, requested), requested)
 
 
 class TestSkipConditionsTest(unittest.TestCase):
