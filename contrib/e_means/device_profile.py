@@ -3,8 +3,8 @@
 ROCm PyTorch reports AMD GPUs as device type "cuda", so ``tensor.is_cuda`` does not
 tell NVIDIA from AMD. This module is the one place that does:
 
-* ``nvidia_capability(device)`` returns the SM capability on NVIDIA and ``None``
-  everywhere else. Use it instead of ``torch.cuda.get_device_capability`` for
+* ``nvidia_capability(device)`` is ``torch.cuda.get_device_capability(device)`` on
+  non-ROCm builds and ``None`` on ROCm builds. Use it instead of the torch call for
   NVIDIA-only feature gates (TMA descriptors, CuTe, FP8 tensor cores). It is not
   cached, so tests that mock ``torch.cuda.get_device_capability`` keep working.
 * ``device_profile(device)`` returns a ``DeviceProfile`` with the vendor and, on AMD,
