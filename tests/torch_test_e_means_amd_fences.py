@@ -70,7 +70,9 @@ class ImpreciseAccHintTest(unittest.TestCase):
 
         source = open(ta.__file__).read()
         tree = ast.parse(source)
-        directory = tempfile.mkdtemp()
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        directory = scratch.name
         modules = {}
         for label, strip in (("hint", False), ("stripped", True)):
             body = "import triton\nimport triton.language as tl\n"
@@ -87,38 +89,49 @@ class ImpreciseAccHintTest(unittest.TestCase):
             with open("%s/%s.py" % (directory, name), "w") as handle:
                 handle.write(body)
             modules[label] = name
+            self.addCleanup(sys.modules.pop, name, None)
         sys.path.insert(0, directory)
         try:
             return {label: importlib.import_module(name) for label, name in modules.items()}
         finally:
             sys.path.remove(directory)
 
-    def test_hint_changes_no_amd_instruction(self):
+    SIG = dict(x_ptr="*fp8e4nv", centroid_ptr="*fp8e4nv", centroid_norm_ptr="*fp32",
+               distance_ptr="*fp32", label_ptr="*i64", B="i32", K="i32", D="i32",
+               stride_xb="i64", stride_xd="i64", stride_ck="i64", stride_cd="i64")
+    CX = dict(BLOCK_B=64, BLOCK_K=256, BLOCK_D=64, FULL_D=False, REDUCED=True, FP16=False,
+              FP8=True, WIDE_CENTROID=False, x_desc=None, centroid_desc=None, SPHERICAL=False)
+
+    def _streams(self, modules, target, asm_key, pattern):
         import triton
-        from triton.backends.compiler import GPUTarget
         from triton.compiler import ASTSource
+
+        sig = dict(self.SIG, **{name: "constexpr" for name in self.CX})
+        streams = {}
+        for label, module in modules.items():
+            kernel = triton.compile(
+                ASTSource(fn=module._assign_kernel, signature=sig, constexprs=self.CX),
+                target=target, options=dict(num_warps=8, num_stages=2, enable_fp_fusion=False))
+            streams[label] = [line.strip() for line in kernel.asm[asm_key].split("\n")
+                              if re.match(pattern, line) and not line.strip().startswith(".")]
+        return streams
+
+    def test_hint_changes_no_amd_instruction(self):
+        from triton.backends.compiler import GPUTarget
 
         modules = self._kernels()
         self.assertIn("max_num_imprecise_acc", open(modules["hint"].__file__).read())
         self.assertNotIn("max_num_imprecise_acc", open(modules["stripped"].__file__).read())
-        sig = dict(x_ptr="*fp8e4nv", centroid_ptr="*fp8e4nv", centroid_norm_ptr="*fp32",
-                   distance_ptr="*fp32", label_ptr="*i64", B="i32", K="i32", D="i32",
-                   stride_xb="i64", stride_xd="i64", stride_ck="i64", stride_cd="i64")
-        cx = dict(BLOCK_B=64, BLOCK_K=256, BLOCK_D=64, FULL_D=False, REDUCED=True, FP16=False,
-                  FP8=True, WIDE_CENTROID=False, x_desc=None, centroid_desc=None, SPHERICAL=False)
-        sig.update({name: "constexpr" for name in cx})
         for arch in ("gfx942", "gfx1200"):
             with self.subTest(arch=arch):
-                streams = {}
-                for label, module in modules.items():
-                    kernel = triton.compile(
-                        ASTSource(fn=module._assign_kernel, signature=sig, constexprs=cx),
-                        target=GPUTarget("hip", arch, 32 if arch.startswith("gfx1") else 64),
-                        options=dict(num_warps=8, num_stages=2, enable_fp_fusion=False))
-                    streams[label] = [line.strip() for line in kernel.asm["amdgcn"].split("\n")
-                                      if re.match(r"\s+[vsgd][a-z_0-9]+\s", line)]
+                target = GPUTarget("hip", arch, 32 if arch.startswith("gfx1") else 64)
+                streams = self._streams(modules, target, "amdgcn", r"\s+[vsgd][a-z_0-9]+\s")
                 self.assertGreater(len(streams["hint"]), 1000)
                 self.assertEqual(streams["hint"], streams["stripped"])
+        # Positive control: on sm90 the hint is real (FP8 WGMMA accumulation), so the
+        # same comparison must see a difference there.
+        streams = self._streams(modules, GPUTarget("cuda", 90, 32), "ptx", r"\s+[a-z]")
+        self.assertNotEqual(streams["hint"], streams["stripped"])
 
 
 if __name__ == "__main__":
