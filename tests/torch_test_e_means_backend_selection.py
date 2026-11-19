@@ -122,5 +122,30 @@ class DefaultCastTest(unittest.TestCase):
             self.assertFalse(e_means_torch._default_cast_supported(X.device, "auto"))
 
 
+class GraphReplayPolicyTest(unittest.TestCase):
+
+    def test_nvidia_always_allows_replay(self):
+        with nvidia((9, 0)), mock.patch.dict("os.environ", {dp.GRAPH_REPLAY_ENV: "0"}):
+            self.assertTrue(dp.graph_replay_supported(X.device))
+
+    def test_rocm_default_is_eager_with_opt_in(self):
+        with amd("gfx1200"):
+            with mock.patch.dict("os.environ", {}, clear=False) as env:
+                env.pop(dp.GRAPH_REPLAY_ENV, None)
+                self.assertFalse(dp.graph_replay_supported(X.device))
+            with mock.patch.dict("os.environ", {dp.GRAPH_REPLAY_ENV: "1"}):
+                self.assertTrue(dp.graph_replay_supported(X.device))
+            with mock.patch.dict("os.environ", {dp.GRAPH_REPLAY_ENV: "0"}):
+                self.assertFalse(dp.graph_replay_supported(X.device))
+
+    def test_training_takes_eager_path_on_rocm(self):
+        model = e_means_torch.Emeans(D, K)
+        x = SimpleNamespace(is_cuda=True, device=X.device)
+        with amd("gfx1200"), mock.patch.dict("os.environ", {}, clear=False) as env:
+            env.pop(dp.GRAPH_REPLAY_ENV, None)
+            # Returns before reading the recipe, which is not set on a fresh model.
+            self.assertFalse(model._replay_eligible(x))
+
+
 if __name__ == "__main__":
     unittest.main()

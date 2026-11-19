@@ -10,6 +10,10 @@ record exactly where each combination stops.
     python tools/w0_smoke.py --only bf16          # substring filter on case names
 
 Results go to stdout as a table and to --out (JSON lines).
+
+On ROCm, training uses the eager loop unless EMEANS_ROCM_GRAPH_REPLAY=1 is set
+(the variable is inherited by every case). Run the matrix both ways: same
+results, and a crash or mismatch with it set means graph replay must stay off.
 """
 import argparse
 import json

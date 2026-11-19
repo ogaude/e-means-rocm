@@ -17,7 +17,7 @@ from .torch_backend import (
     default_chunk_size,
     _separate_splits,
 )
-from .device_profile import amd_triton_supported, is_rocm
+from .device_profile import amd_triton_supported, graph_replay_supported, is_rocm
 
 from .base import (
     _EmeansBase,
@@ -745,6 +745,7 @@ class Emeans(_EmeansBase):
         if (
             not self._capture_operations_match()
             or not x.is_cuda
+            or not graph_replay_supported(x.device)
             or (self.recipe["batch_size"] > 2**24)
             or (self.recipe["steps_per_pass"] < 3)
         ):

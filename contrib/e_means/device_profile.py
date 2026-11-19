@@ -167,6 +167,24 @@ def amd_triton_supported(device):
 
 AMD_TARGETS = "gfx942, gfx950, gfx11xx or gfx120x"
 
+GRAPH_REPLAY_ENV = "EMEANS_ROCM_GRAPH_REPLAY"
+
+
+def graph_replay_supported(device):
+    """Whether training may use CUDA-graph capture and replay on this device.
+
+    NVIDIA: always, as upstream. ROCm: off by default until graph capture
+    (CUDAGraph, MemPool, thread-local capture mode) is verified on the pinned
+    ROCm PyTorch; set EMEANS_ROCM_GRAPH_REPLAY=1 to opt in. With replay off,
+    training runs the existing eager loop, which gives identical results.
+    ``device`` is accepted for a later per-family decision.
+    """
+    if not is_rocm():
+        return True
+    import os
+
+    return os.environ.get(GRAPH_REPLAY_ENV, "0") == "1"
+
 
 def device_profile(device):
     """Profile of the device a tensor lives on (``tensor.device`` or a device spec)."""
