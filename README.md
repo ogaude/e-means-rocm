@@ -4,7 +4,7 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: work in progress. Running on RX 9000 (gfx1200); MI300X next.** On an RX 9060 XT
+> **Status: v0.1 in progress, running on RX 9000 (gfx1200). MI300X is planned for v0.2.** On an RX 9060 XT
 > (ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every FP32/FP16/BF16 path trains,
 > the e-means test suite passes (one known upstream failure, below), the rewritten kernels match
 > PyTorch bit for bit, and Triton is 2.2× to 4× faster than PyTorch for BF16 and FP16.
@@ -14,10 +14,10 @@ fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 | Family | Architecture | Example GPUs | Plan |
 |---|---|---|---|
-| CDNA 3 | gfx942 | MI300X, MI325X | hardware run planned |
+| CDNA 3 | gfx942 | MI300X, MI325X | compile-checked; validation and tuning in v0.2 |
 | CDNA 4 | gfx950 | MI350 series | compile-checked |
 | RDNA 3 | gfx11xx | RX 7000 series | compile-checked |
-| RDNA 4 | gfx120x | RX 9000 series | **runs**, tested on RX 9060 XT |
+| RDNA 4 | gfx120x | RX 9000 series | **runs**, tested on RX 9060 XT (v0.1) |
 
 Sibling chips (gfx1101, gfx1201, ...) are matched by family. Other AMD GPUs fall back to native
 FP32 through PyTorch, which upstream already supports.
@@ -116,7 +116,16 @@ rewrite; see its README.
 
 ## Roadmap
 
-**v0.1: Triton as the default AMD path for FP32, FP16 and BF16**
+| Version | Scope | Hardware |
+|---|---|---|
+| **v0.1** (in progress) | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | local RX 9060 XT |
+| v0.2 | MI300X (gfx942) validation and tuning; INT8 on all four families; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) and RX 9060 XT |
+| v0.3 | FP8: native on gfx120x (tested) and gfx950 (compile-checked), optionally emulated on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X |
+| v0.4 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) |
+
+FP8 on RDNA4 needs only the local card, so it may move into v0.2 if a cloud session slips.
+
+**v0.1 status**
 
 | Item | Status |
 |---|---|
@@ -125,23 +134,22 @@ rewrite; see its README.
 | Device profile and backend selection | done; Triton selected by default on gfx1200 |
 | NVIDIA-only Triton features fenced off on AMD | done |
 | Graph-replay guard (eager by default on ROCm) | done; replay verified on gfx1200, no speed-up |
-| Vendor-aware test skips and bit-level numerics tests | done; passing on gfx1200 |
-| Documentation | done |
-| RX 9060 XT runs | done |
-| MI300X runs (gfx942) | next |
-| Per-family tuning (tiles, stages, warps) | needs measurements; FP32 on RX settled (Triton ≥ PyTorch) |
 | Native FP16/BF16 PyTorch fallback on ROCm | done; verified on gfx1200 |
-| Multi-GPU | out of scope ("expected to work, untested") |
+| Vendor-aware test skips and bit-level numerics tests | done; passing on gfx1200 |
+| RX 9060 XT runs | done |
+| RDNA4 tuning table (tiles, warps, stages) | in progress: assignment kernel 1.1× to 2.9× faster in the sweep |
+| Documentation | done; updated with each item |
 
-Acceptance for v0.1: the default `Emeans(d, k).train(x)` uses Triton on gfx1200 and gfx942;
-final loss within noise of the PyTorch backend and of NVIDIA; EMA update and split bit-equal to
-PyTorch; Triton faster than PyTorch for BF16; NVIDIA tests unchanged.
+Acceptance for v0.1: on gfx1200, the default `Emeans(d, k).train(x)` uses Triton; final loss
+within noise of the PyTorch backend; EMA update and split bit-equal to PyTorch; Triton faster
+than PyTorch for BF16; NVIDIA behaviour unchanged (selection and kernels are checked with
+mocked devices and sm90 compiles; a run on NVIDIA hardware is still outstanding).
 
-**v0.2:** INT8 on all four families; FP8 on gfx950 and gfx120x (native FP8 matrix instructions);
-decide by measurement whether a hand-written AMD kernel (the CuTe counterpart) is worth building.
-
-**v0.3 (optional):** emulated FP8 on gfx942 and gfx11xx, multi-GPU validation, hardware runs on
-gfx950 and gfx11xx.
+**What v0.1 does not cover.** gfx942 (MI300), gfx950 (MI350) and gfx11xx (RX 7000) select the
+same Triton path and compile cleanly, but have not been run and use the upstream (NVIDIA-fitted)
+tile settings: expected to work, not validated and not tuned. MI300 is covered by v0.2. INT8
+and FP8 are refused with an error until v0.2 and v0.3. Several GPUs are expected to work but are
+untested until v0.4.
 
 ## Repository layout
 

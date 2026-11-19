@@ -416,7 +416,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   (1.03× to 1.35× measured), so it stays the automatic choice.
 - ⁴ AMD support in this fork is work in progress. On an RX 9060 XT (RX 9000, gfx1200, ROCm 10.1)
   every precision above trains, the e-means tests pass, and Triton is 2.2× to 4× faster than
-  PyTorch for BF16 and FP16. MI300 runs are next; MI350 and RX 7000 are compile-checked only.
+  PyTorch for BF16 and FP16. MI300 validation and tuning are planned next; MI350 and RX 7000 are
+  compile-checked only and use the NVIDIA-fitted tile settings.
   Other AMD GPUs (for example MI200, gfx90a) run native FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
   On the four families without Triton, the automatic choice uses the slower PyTorch path (BF16 by
   default, or your data's FP16/BF16/FP32) instead of raising an error as on NVIDIA.
