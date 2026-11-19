@@ -1118,23 +1118,11 @@ def _cast_fp8_centroids_kernel(
     value = tl.load(source + row * d + column, mask=mask, other=0.0)
     if AFFINE:
         shift = tl.load(bias + column, mask=mask, other=0.0)
-        value = tl.inline_asm_elementwise(
-            "fma.rn.f32 $0, $1, $2, $3;",
-            constraints="=f,f,f,f",
-            args=[value, scale, shift],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
+        # Single-rounding FMA; the launch sets enable_fp_fusion=False, so no other
+        # multiply/add pair in this kernel is contracted.
+        value = tl.fma(value, scale, shift)
     elif QUANTIZED:
-        value = tl.inline_asm_elementwise(
-            "mul.rn.f32 $0, $1, $2;",
-            constraints="=f,f,f",
-            args=[value, scale],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
+        value = value * scale
     value = tl.where(mask, value, 0.0)
     # Absolute finite bits are ordered; unsigned maximum also retains any prior NaN.
     maximum = tl.max(tl.abs(value).to(tl.uint32, bitcast=True), 0)
@@ -1243,6 +1231,33 @@ def copy_byte_stats(source, out, *, unsigned):
     torch.autograd.graph.increment_version(out)
 
 
+# The helpers below are plain IEEE-754 operations. They keep the rounding of the
+# per-operation PTX they replace only because their callers launch with
+# enable_fp_fusion=False (no FMA contraction) and the default allow_flush_denorm=False
+# (subnormals preserved). Do not drop either launch option.
+@triton.jit
+def _rn_step_mass(alpha, count, retained):
+    step = alpha * count
+    return step, retained + step
+
+
+@triton.jit
+def _rn_lerp(mean, centroid, weight):
+    return (mean - centroid) * weight + centroid
+
+
+@triton.jit
+def _rn_split(value, epsilon, sign):
+    offset = epsilon * sign
+    return value * (1.0 - offset), value * (1.0 + offset)
+
+
+@triton.jit
+def _rn_bf16_bits(low, high):
+    return (low.to(tl.bfloat16, fp_downcast_rounding="rtne").to(tl.uint16, bitcast=True),
+            high.to(tl.bfloat16, fp_downcast_rounding="rtne").to(tl.uint16, bitcast=True))
+
+
 @triton.jit
 def _ema_update_kernel(
     sums, counts, centroids, usage, k, d, sum_stride, count_stride,
@@ -1257,17 +1272,9 @@ def _ema_update_kernel(
     count = tl.load(counts + row * count_stride, mask=valid, other=0.0).to(tl.float32)
     old_usage = tl.load(usage + row, mask=valid, other=0.0)
     touched = count > 0
-    # Explicit RN operations preserve subnormals without FMA/reassociation.
-    retained = tl.inline_asm_elementwise(
-        "mul.rn.f32 $0, $1, $2;", constraints="=f,f,f",
-        args=[old_usage, decay], dtype=tl.float32, is_pure=True, pack=1,
-    ) if DECAY else 0.0
-    step, mass = tl.inline_asm_elementwise(
-        "{ .reg .f32 increment, total; mul.rn.f32 increment, $2, $3; "
-        "add.rn.f32 total, $4, increment; mov.b32 $0, increment; mov.b32 $1, total; }",
-        constraints="=f,=f,f,f,f", args=[alpha, count, retained],
-        dtype=(tl.float32, tl.float32), is_pure=True, pack=1,
-    )
+    # Plain RN operations preserve subnormals without FMA/reassociation (see helpers).
+    retained = old_usage * decay if DECAY else 0.0
+    step, mass = _rn_step_mass(alpha, count, retained)
     weight = tl.math.div_rn(step, tl.where(touched, mass, 1.0))
     divisor = tl.where(touched, count, 1.0)[:, None]
     for begin in range(0, d, BLOCK_D):
@@ -1278,12 +1285,7 @@ def _ema_update_kernel(
         offset = row[:, None] * d + col[None, :]
         centroid = tl.load(centroids + offset, mask=moving, other=0.0)
         mean = tl.math.div_rn(value, divisor)
-        position = tl.inline_asm_elementwise(
-            "{ .reg .f32 delta, scaled; sub.rn.f32 delta, $1, $2; "
-            "mul.rn.f32 scaled, delta, $3; add.rn.f32 $0, scaled, $2; }",
-            constraints="=f,f,f,f", args=[mean, centroid, weight[:, None]],
-            dtype=tl.float32, is_pure=True, pack=1,
-        )
+        position = _rn_lerp(mean, centroid, weight[:, None])
         tl.store(centroids + offset, tl.where((weight == 1)[:, None], mean, position),
                  mask=moving)
     # Retained usage can be reloaded per layout: finish every read before writing.
@@ -1341,41 +1343,16 @@ def _write_float_splits_kernel(
     child = tl.load(target + tl.program_id(0)).to(tl.int64)
     col = tl.arange(0, BLOCK_D).to(tl.int64)
     value = tl.load(centroids + donor * d + col, mask=col < d, other=0.0)
-    low, high = tl.inline_asm_elementwise(
-        "{ .reg .f32 offset, minus, plus, low, high; mul.rn.f32 offset, $3, $4; "
-        "sub.rn.f32 minus, 0f3F800000, offset; add.rn.f32 plus, 0f3F800000, offset; "
-        "mul.rn.f32 low, $2, minus; mul.rn.f32 high, $2, plus; "
-        "mov.b32 $0, low; mov.b32 $1, high; }",
-        constraints="=f,=f,f,f,f", args=[value, epsilon, tl.where(col % 2 == 0, 1.0, -1.0)],
-        dtype=(tl.float32, tl.float32), is_pure=True, pack=1,
-    )
+    low, high = _rn_split(value, epsilon, tl.where(col % 2 == 0, 1.0, -1.0))
     if FP8:
         low_code, high_code = low, high
         if SCALED:
-            low_code = tl.inline_asm_elementwise(
-                "mul.rn.f32 $0, $1, $2;",
-                constraints="=f,f,f",
-                args=[low, scale],
-                dtype=tl.float32,
-                is_pure=True,
-                pack=1,
-            )
-            high_code = tl.inline_asm_elementwise(
-                "mul.rn.f32 $0, $1, $2;",
-                constraints="=f,f,f",
-                args=[high, scale],
-                dtype=tl.float32,
-                is_pure=True,
-                pack=1,
-            )
+            low_code = low * scale
+            high_code = high * scale
         low_bits = low_code.to(tl.float8e4nv, fp_downcast_rounding="rtne").to(tl.uint8, bitcast=True).to(tl.uint32)
         high_bits = high_code.to(tl.float8e4nv, fp_downcast_rounding="rtne").to(tl.uint8, bitcast=True).to(tl.uint32)
     elif BF16:
-        low_bits, high_bits = tl.inline_asm_elementwise(
-            "cvt.rn.bf16.f32 $0, $2; cvt.rn.bf16.f32 $1, $3;",
-            constraints="=h,=h,f,f", args=[low, high],
-            dtype=(tl.uint16, tl.uint16), is_pure=True, pack=1,
-        )
+        low_bits, high_bits = _rn_bf16_bits(low, high)
         low_bits, high_bits = low_bits.to(tl.uint32), high_bits.to(tl.uint32)
     else:
         low_bits, high_bits = low.to(tl.uint32, bitcast=True), high.to(tl.uint32, bitcast=True)
@@ -1403,10 +1380,9 @@ def _write_float_splits_kernel(
     else:
         neighbor = (moved << 16 if BF16 else moved).to(tl.float32, bitcast=True)
     high = tl.where((col == 0) & collapsed, neighbor, high)
-    half = tl.inline_asm_elementwise(
-        "div.rn.f32 $0, $1, 0f40000000;", constraints="=f,f",
-        args=[tl.load(usage + donor)], dtype=tl.float32, is_pure=True, pack=1,
-    )
+    # x * 0.5 and x / 2.0 both round the exact x/2 once, so they are equal for every
+    # input, subnormals included (only odd subnormals actually round).
+    half = tl.load(usage + donor) * 0.5
     tl.store(centroids + donor * d + col, low, mask=col < d)
     tl.store(centroids + child * d + col, high, mask=col < d)
     tl.store(usage + donor, half)
