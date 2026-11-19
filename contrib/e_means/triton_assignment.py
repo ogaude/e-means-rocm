@@ -30,6 +30,8 @@ try:
 except ImportError:
     _fp8_libdevice = None
 
+from .device_profile import nvidia_capability
+
 
 _INT32_MAX = 2**31 - 1
 # ROCm (10.1) Triton keeps num_stages - 1 LDS copies of each streamed tile; at three
@@ -794,7 +796,7 @@ def _launch_assignment(
             and is_reduced
             and d > _FULL_D_MAX_D
             and x.dtype == centroids.dtype
-            and torch.cuda.get_device_capability(x.device) == (9, 0)
+            and nvidia_capability(x.device) == (9, 0)
             and all(
                 t.stride(0) >= t.shape[1] and _descriptor_layout(t)
                 for t in (x, centroids)
@@ -1029,7 +1031,7 @@ def assign_int8_rows(
     # The staged width is bounded and16-aligned by _int8_physical_d;
     # its CUDA allocation has aligned unit-stride rows. Check before staging.
     use_descriptors = (not full_d
-                       and torch.cuda.get_device_capability(x.device) == (9, 0)
+                       and nvidia_capability(x.device) == (9, 0)
                        and _descriptor_layout(centroids)
                        and (0 < b <= 2**31 if stage_rows else _descriptor_layout(x)))
     from_tensor = _descriptor_from_tensor() if use_descriptors else None

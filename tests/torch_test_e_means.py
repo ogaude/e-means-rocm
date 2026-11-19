@@ -2165,7 +2165,9 @@ if cuda_supported:
         rows = torch.empty((8192, 256), dtype=torch.bfloat16)
         centroids = torch.empty((128, 256), dtype=torch.bfloat16)
         kernel = mock.MagicMock()
+        # NVIDIA SM90 path; pin a non-ROCm build so it also runs under ROCm PyTorch.
         with mock.patch.object(torch.cuda, 'get_device_capability', return_value=(9, 0)), \
+             mock.patch.object(torch.version, 'hip', None), \
              mock.patch.object(backend, '_assign_kernel', kernel):
             for api in (None, SimpleNamespace(from_tensor=None)):
                 with mock.patch.object(backend, 'TensorDescriptor', api), self.assertRaises(ImportError):

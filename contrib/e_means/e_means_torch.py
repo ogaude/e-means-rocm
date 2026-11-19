@@ -17,6 +17,7 @@ from .torch_backend import (
     default_chunk_size,
     _separate_splits,
 )
+from .device_profile import amd_triton_supported, is_rocm
 
 from .base import (
     _EmeansBase,
@@ -41,6 +42,18 @@ __all__ = [
     "_round_power_of_two",
     "_scheduled_alpha",
 ]
+
+
+def _default_cast_supported(device, requested):
+    """Whether automatic FP32 -> BF16 casting applies on this CUDA-type device.
+
+    NVIDIA: always, as upstream. AMD (ROCm): only when the Triton backend will run
+    the BF16 assignment, i.e. a target-family GPU with Triton and backend auto or
+    triton. Otherwise AMD input stays FP32 and the native backend runs it.
+    """
+    if not is_rocm():
+        return True
+    return requested in ("auto", "triton") and amd_triton_supported(device)
 
 
 def _torch_generator(device, seed):
@@ -279,7 +292,8 @@ class Emeans(_EmeansBase):
     def _resolve_input_dtype(self, x):
         if self._input_dtype is None:
             dtype = torch.float32 if x.device.type == "cpu" else x.dtype
-            cast = self._automatic and x.device.type == "cuda" and x.dtype == torch.float32
+            cast = (self._automatic and x.device.type == "cuda" and x.dtype == torch.float32
+                    and _default_cast_supported(x.device, self.assignment_backend))
             if cast:
                 dtype = torch.bfloat16
             self._bind_input_dtype(dtype, cast=cast)

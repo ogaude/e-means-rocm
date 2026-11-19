@@ -11,6 +11,8 @@ selection and capture resources. E-means owns the training state and schedule.
 
 import torch
 
+from .device_profile import AMD_TARGETS, amd_triton_supported, is_rocm, nvidia_capability
+
 
 def _check_torch_abs_bound(name, bound, *tensors):
     extrema = torch.stack(
@@ -503,8 +505,13 @@ def select_backend(x, dtype, k, d, requested="auto"):
         raise ValueError("assignment_backend must be auto, native, triton or cute")
     if x.device.type == "cpu":
         return TorchBackend
-    capability = torch.cuda.get_device_capability(x.device) if torch.version.hip is None else (0, 0)
+    # NVIDIA: SM capability, exactly as before. AMD (ROCm reports device type
+    # "cuda" too): capability stays (0, 0) so CuTe and the NVIDIA-only native
+    # reduced-precision path are never chosen; Triton is chosen for the target
+    # families instead.
+    capability = nvidia_capability(x.device) or (0, 0)
     cuda = capability >= (8, 0)
+    amd_triton = amd_triton_supported(x.device)
     if dtype in (torch.int8, torch.uint8):
         from .quantizer_int8 import _check_int8_support
 
@@ -522,7 +529,7 @@ def select_backend(x, dtype, k, d, requested="auto"):
             and k <= 2**31 - 192 and 0 < d < 2**31
             and padded_k * padded_d < 2**31):
         return CuteBackend
-    if cuda and k <= 2**31 - 256:
+    if (cuda or amd_triton) and k <= 2**31 - 256:
         return TritonBackend
     floating = dtype in (torch.float32, torch.float16, torch.bfloat16)
     native = dtype is torch.float32 or (
@@ -530,6 +537,12 @@ def select_backend(x, dtype, k, d, requested="auto"):
     )
     if floating and native:
         return TorchBackend
+    if floating and is_rocm():
+        raise RuntimeError(
+            "auto assignment has no compatible backend for this device and "
+            "representation: FP16/BF16 assignment requires an NVIDIA SM80 or "
+            "later GPU, or an AMD %s GPU with Triton installed" % AMD_TARGETS
+        )
     if floating:
         raise RuntimeError(
             "auto assignment has no compatible backend for this device and "

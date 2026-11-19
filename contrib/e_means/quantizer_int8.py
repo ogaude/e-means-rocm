@@ -173,6 +173,11 @@ def _check_int8_support(device):
     """Reject devices outside the qualified INT8 assignment targets."""
     if device.type != "cuda":
         raise ValueError("INT8 assignment requires a CUDA tensor")
+    if getattr(torch.version, "hip", None) is not None:
+        raise RuntimeError(
+            "INT8 assignment requires an NVIDIA SM80, SM90, or SM100 GPU; "
+            "AMD support is planned (e-means-rocm v0.2), use BF16, FP16 or FP32 for now"
+        )
     capability = torch.cuda.get_device_capability(device)
     if (
         getattr(torch.version, "hip", None) is not None
