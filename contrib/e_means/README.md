@@ -46,6 +46,21 @@ python -m pip install "nvidia-cutlass-dsl[cu13]>=4.7.1" "quack-kernels[cu13]>=0.
 python -m pip install "cuda-cccl[cu13]"    # optional, recommended for grouping performance
 ```
 
+**AMD GPUs (ROCm).** Install a ROCm build of PyTorch and a Triton build for the same ROCm
+release (AMD's gfx1200 PyTorch wheel installs a matching Triton build itself). Use a separate
+virtual environment. For example, for an RX 9000 card (gfx1200) on ROCm 10.1:
+
+```bash
+python3 -m venv ~/venvs/emeans-rocm && source ~/venvs/emeans-rocm/bin/activate
+python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ \
+  "torch[device-gfx1200]==2.14.0+rocm10.1.0"     # brings triton 3.8.0+rocm10.1.0
+pip install faiss-cpu numpy
+python -c "import torch, triton; print(torch.__version__, torch.version.hip, triton.__version__)"
+```
+
+ROCm PyTorch reports AMD GPUs as device type `"cuda"`, so the usual `device="cuda"` code runs
+unchanged. See the AMD notes under Kernels for what is supported.
+
 ```python
 from faiss.contrib.e_means import NumpyEmeans
 ```
@@ -56,7 +71,7 @@ from faiss.contrib.e_means import NumpyEmeans
 | PyTorch | data held as PyTorch tensors, on a CPU or a GPU |
 | The three CuTe packages above | the fastest kernels, H100 and H200 only (`assignment_backend="cute"`) |
 | `cuda-cccl` (optional) | faster grouping inside the CuTe kernels. Without it, e-means warns once and uses a PyTorch fallback |
-| Triton | fast kernels on other recent NVIDIA GPUs, A100 or newer (`assignment_backend="triton"`) |
+| Triton | fast kernels on other recent NVIDIA GPUs, A100 or newer, and on AMD MI300, MI350, RX 7000 and RX 9000 GPUs (`assignment_backend="triton"`) |
 
 GPU kernels compile the first time they run, which takes a few seconds.
 
@@ -376,15 +391,15 @@ Most of e-means' runtime goes into assigning each training vector to its nearest
 
 Which implementation your run will use (CuTe, Triton, PyTorch) is automatically selected from your GPU type and your data's precision.
 
-| Your data | H100/H200 | B200 | B300 | A100 | Other recent GPUs (RTX 30/40, L40S, A10) | Older GPUs (V100, T4) |
-|---|---|---|---|---|---|---|
-| FP32, default BF16 conversion | **CuTe**¹ | Triton¹ | Triton¹ | Triton¹ | Triton¹ | no |
-| Native FP32 (`quantizer=None`) | Triton | Triton | Triton | Triton | Triton | PyTorch |
-| BF16 | **CuTe** | Triton | Triton | Triton | Triton | no |
-| FP16 | Triton | Triton | Triton | Triton | Triton | no |
-| FP8 (`float8_e4m3fn`) | Triton² | Triton | Triton | no | no | no |
-| INT8, UINT8 | Triton² | Triton | no | Triton | no | no |
-| float64 | no | no | no | no | no | no |
+| Your data | H100/H200 | B200 | B300 | A100 | Other recent GPUs (RTX 30/40, L40S, A10) | Older GPUs (V100, T4) | AMD MI300, MI350 (gfx942, gfx950)⁴ | AMD RX 7000, RX 9000 (gfx11xx, gfx120x)⁴ |
+|---|---|---|---|---|---|---|---|---|
+| FP32, default BF16 conversion | **CuTe**¹ | Triton¹ | Triton¹ | Triton¹ | Triton¹ | no | Triton¹ | Triton¹ |
+| Native FP32 (`quantizer=None`) | Triton | Triton | Triton | Triton | Triton | PyTorch | Triton | Triton³ |
+| BF16 | **CuTe** | Triton | Triton | Triton | Triton | no | Triton | Triton |
+| FP16 | Triton | Triton | Triton | Triton | Triton | no | Triton | Triton |
+| FP8 (`float8_e4m3fn`) | Triton² | Triton | Triton | no | no | no | no⁵ | no⁵ |
+| INT8, UINT8 | Triton² | Triton | no | Triton | no | no | no⁵ | no⁵ |
+| float64 | no | no | no | no | no | no | no | no |
 
 - ¹ CUDA FP32 input uses BF16 operands by default. To retain native FP32 input, use
   `QuantizedEmeans(d, k, quantizer=None)`. These are automatic choices for supported extents;
@@ -395,8 +410,27 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   raises an error; e-means does not switch to another assignment backend.
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
-- AMD GPUs require native FP32 via `QuantizedEmeans(d, k, quantizer=None)`, through PyTorch.
-  On the CPU, computation remains FP32 (see On the CPU).
+- ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 there is expected to
+  be much slower than BF16 (not yet measured). Keep the default BF16 conversion on these cards. Whether Triton or PyTorch is faster
+  for native FP32 on them is still to be measured; the automatic choice may change.
+- ⁴ AMD support in this fork is work in progress: the kernels compile for all four families and
+  pass offline code checks, but have not yet been run on AMD hardware. Runs on RX 9000 and MI300
+  are planned; MI350 and RX 7000 are compile-checked only. Other AMD GPUs (for example MI200, gfx90a) run native
+  FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
+  The same happens on the four families when Triton is not installed: unlike on NVIDIA, the
+  automatic choice then uses PyTorch for FP32 instead of raising an error.
+- ⁵ Refused with an error. INT8 on all four AMD families, and FP8 on MI350 and RX 9000 (the AMD
+  GPUs with a native FP8 matrix instruction), are planned.
+- On the CPU, computation remains FP32 (see On the CPU).
+
+**More on AMD GPUs.**
+- The CuTe kernels are NVIDIA H100/H200 only; `assignment_backend="cute"` raises an error on AMD.
+- Training uses the plain (eager) loop on AMD, not CUDA-graph replay, until graph capture has
+  been verified on ROCm. Results are the same, only speed differs. To try replay, set
+  `EMEANS_ROCM_GRAPH_REPLAY=1`.
+- With `assignment_backend="native"`, FP32 data stays FP32 on AMD, and FP16/BF16 data through
+  the PyTorch path has not been verified on ROCm yet.
+- Several GPUs (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are untested.
 
 ### Data precision
 The precision used in your e-means run has an important influence on training speed. On a GPU, e-means iterations can run in smaller number formats, which recent GPUs process faster: 16-bit floats (FP16, BF16), 8-bit floats
@@ -530,4 +564,12 @@ python -m unittest discover -s tests -p 'torch_test_e_means*.py'
 ```
 
 The tests need two commands, because Python's default test discovery skips the PyTorch test files.
+
+On AMD GPUs, the same commands run the Triton tests on the four supported families; tests of
+FP8, INT8, CuTe, several GPUs and native FP16/BF16 are skipped. Add `EMEANS_ROCM_GRAPH_REPLAY=1`
+to also run the CUDA-graph replay tests. Some tests need no GPU at all: they compile the Triton
+kernels for gfx942, gfx950, gfx1100 and gfx1200 and check the generated code
+(`torch_test_e_means_ptx_free.py`, `torch_test_e_means_amd_fences.py`). To run tests without
+touching an AMD GPU, hide it with `ROCR_VISIBLE_DEVICES=` (empty); `HIP_VISIBLE_DEVICES=-1`
+aborts on ROCm 10.1.
 The 10-billion-vector demos (DINO10B, resident and from SSD) are in `benchs/e_means/`, with their own README.
