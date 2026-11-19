@@ -30,6 +30,7 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 | Area | Change |
 |---|---|
 | Kernels | The 10 PTX inline-assembly snippets in the EMA-update, split and FP8-cast kernels are replaced by plain Triton arithmetic. With fusion off it compiles to the same `.rn` instructions on NVIDIA, and to valid code on all four AMD families. |
+| Tuning | Per-family assignment-kernel settings (`_AMD_DIRECT_CONFIGS` in `triton_assignment.py`). RDNA4 is tuned: the kernel is 1.1× to 2.7× faster and training 1.25× to 1.35× faster than with the NVIDIA-fitted constants, with identical results. Other families keep the constants. |
 | Device detection | New `device_profile.py`: tells NVIDIA from AMD (ROCm reports both as `"cuda"`) and maps AMD chips to a family with its wavefront size, LDS budget and matrix-instruction support. |
 | Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. The PyTorch backend also handles FP16/BF16 there (`torch.addmm(out_dtype=)`), as explicit `native` or as the fallback without Triton. CuTe and TMA descriptors are never selected on AMD. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
@@ -114,6 +115,14 @@ EMEANS_ROCM_GRAPH_REPLAY=1 python tools/w0_smoke.py    # same with graph replay
 `tools/rocm_probe/` holds the offline compile probes (no GPU needed) used to verify the kernel
 rewrite; see its README.
 
+Assignment-kernel tuning (sweep tile sizes, warps and stages; every candidate is checked against
+the upstream configuration's results):
+
+```bash
+python tools/tune_assign.py --quick --k 1024 16384     # full sweep, about two hours on gfx1200
+python tools/tune_assign.py --compare                  # upstream constants vs this GPU's table
+```
+
 ## Roadmap
 
 | Version | Scope | Hardware |
@@ -137,7 +146,7 @@ FP8 on RDNA4 needs only the local card, so it may move into v0.2 if a cloud sess
 | Native FP16/BF16 PyTorch fallback on ROCm | done; verified on gfx1200 |
 | Vendor-aware test skips and bit-level numerics tests | done; passing on gfx1200 |
 | RX 9060 XT runs | done |
-| RDNA4 tuning table (tiles, warps, stages) | in progress: assignment kernel 1.1× to 2.9× faster in the sweep |
+| RDNA4 tuning table (tiles, warps, stages) | done: assignment kernel up to 2.7× faster, training 1.25× to 1.35× faster on gfx1200 |
 | Documentation | done; updated with each item |
 
 Acceptance for v0.1: on gfx1200, the default `Emeans(d, k).train(x)` uses Triton; final loss
@@ -159,6 +168,7 @@ benchs/e_means/      upstream benchmarks and demos
 tests/               e-means tests (upstream + new ROCm tests)
 tools/rocm_probe/    offline Triton compile probes for AMD targets
 tools/w0_smoke.py    precision x backend smoke matrix
+tools/tune_assign.py assignment-kernel tuning sweep and upstream-vs-table comparison
 ```
 
 ## Relation to upstream faiss

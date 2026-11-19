@@ -59,6 +59,45 @@ _INT8_BLOCK_D = 128
 _INT8_PREPARE_BLOCK_D = 256
 _INT8_MAX_D = 43919
 _INT8_D_ALIGNMENT = 16
+# Per-family direct-kernel configurations for AMD (W6). NVIDIA, and AMD families
+# without an entry, keep the constants above. Each rule is (max_d, (BLOCK_B, BLOCK_K,
+# BLOCK_D, num_warps, num_stages)); the first rule with d <= max_d applies. BLOCK_D is
+# None on the FULL_D path (64 < d <= 128, reduced precision), where it is d rounded up.
+# rdna4 (gfx120x): chosen with tools/tune_assign.py on an RX 9060 XT (gfx1200, ROCm
+# 10.1, Triton 3.8); comments give the speed-up over the constants above from
+# `tune_assign.py --compare` (65,536 rows, d = 32 to 768, k = 1,024 to 16,384, BF16, FP16
+# and FP32: 81 shapes, none slower beyond timing noise, all with the same results).
+# Training (warm train(), 3 epochs) is 1.25-1.35x faster at 1M x 128 and larger.
+_AMD_DIRECT_CONFIGS = {
+    "rdna4": {
+        "reduced": (
+            (32, (128, 64, 32, 4, 2)),          # 1.4-1.7x
+            (64, (64, 128, 32, 4, 2)),          # 1.0-1.3x
+            (128, (128, 64, None, 8, 1)),       # FULL_D, 1.6-2.4x
+            (None, (64, 256, 64, 8, 2)),        # BLOCK_B 64, not 128: 2.1-2.7x
+        ),
+        "fp32": (
+            (None, (64, 64, 16, 4, 3)),         # 1.2-1.7x
+        ),
+    },
+}
+
+
+def _amd_direct_config(device, is_reduced, d):
+    """Tuned (BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages) on AMD, else None."""
+    if torch.version.hip is None:
+        return None
+    from .device_profile import device_profile
+
+    rules = _AMD_DIRECT_CONFIGS.get(device_profile(device).family)
+    if rules is None:
+        return None
+    for max_d, config in rules["reduced" if is_reduced else "fp32"]:
+        if max_d is None or d <= max_d:
+            return config
+    return None
+
+
 _MAX_K = 2**31 - max(
     _SPLIT_K_MAX_PARTITIONS,
     _SPLIT_K_BLOCK_K,
@@ -802,7 +841,12 @@ def _launch_assignment(
                 for t in (x, centroids)
             )
         )
-        if full_d:
+        tuned = None if is_fp8 else _amd_direct_config(x.device, is_reduced, d)
+        if tuned is not None:
+            block_b, block_k, block_d, num_warps, num_stages = tuned
+            if full_d:
+                block_d = max(16, triton.next_power_of_2(d))
+        elif full_d:
             block_b, block_k, num_warps, num_stages = _FULL_D_CONFIG
             block_d = max(16, triton.next_power_of_2(d))
         else:
