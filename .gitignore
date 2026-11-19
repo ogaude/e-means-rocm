@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+/.venv/
+
+# local planning docs (not tracked)
+/docs/
+
+# e-means ROCm probe outputs
+tools/rocm_probe/ported_kernels.py
+tools/rocm_probe/assign_kernels.py
+tools/rocm_probe/plain_*.s
+tools/rocm_probe/plain_*.ll
+w0_smoke_results.jsonl
