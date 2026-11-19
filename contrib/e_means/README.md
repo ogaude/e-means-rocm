@@ -410,13 +410,14 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   raises an error; e-means does not switch to another assignment backend.
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
-- ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 there is expected to
-  be much slower than BF16 (not yet measured). Keep the default BF16 conversion on these cards. Whether Triton or PyTorch is faster
-  for native FP32 on them is still to be measured; the automatic choice may change.
-- ⁴ AMD support in this fork is work in progress: the kernels compile for all four families and
-  pass offline code checks, but have not yet been run on AMD hardware. Runs on RX 9000 and MI300
-  are planned; MI350 and RX 7000 are compile-checked only. Other AMD GPUs (for example MI200, gfx90a) run native
-  FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
+- ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
+  BF16 there: 3.3× on an RX 9060 XT (1M × 128 vectors, 4,096 centroids). Keep the default BF16
+  conversion on these cards. Triton is still at least as fast as PyTorch for native FP32
+  (1.03× to 1.35× measured), so it stays the automatic choice.
+- ⁴ AMD support in this fork is work in progress. On an RX 9060 XT (RX 9000, gfx1200, ROCm 10.1)
+  every precision above trains, the e-means tests pass, and Triton is 2.2× to 4× faster than
+  PyTorch for BF16 and FP16. MI300 runs are next; MI350 and RX 7000 are compile-checked only.
+  Other AMD GPUs (for example MI200, gfx90a) run native FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
   The same happens on the four families when Triton is not installed: unlike on NVIDIA, the
   automatic choice then uses PyTorch for FP32 instead of raising an error.
 - ⁵ Refused with an error. INT8 on all four AMD families, and FP8 on MI350 and RX 9000 (the AMD
@@ -425,9 +426,12 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 
 **More on AMD GPUs.**
 - The CuTe kernels are NVIDIA H100/H200 only; `assignment_backend="cute"` raises an error on AMD.
-- Training uses the plain (eager) loop on AMD, not CUDA-graph replay, until graph capture has
-  been verified on ROCm. Results are the same, only speed differs. To try replay, set
-  `EMEANS_ROCM_GRAPH_REPLAY=1`.
+- Training uses the plain (eager) loop on AMD, not CUDA-graph replay. Results are the same, only
+  speed differs. Replay works on the RX 9060 XT but gave no measurable speed-up there, so it is
+  opt-in: set `EMEANS_ROCM_GRAPH_REPLAY=1`.
+- As on NVIDIA, training is not bit-reproducible by default: batch statistics are summed with
+  atomic additions, so repeated FP32 runs can end in different clusterings. For identical runs,
+  call `torch.use_deterministic_algorithms(True)` (verified on ROCm, eager and replay).
 - With `assignment_backend="native"`, FP32 data stays FP32 on AMD, and FP16/BF16 data through
   the PyTorch path has not been verified on ROCm yet.
 - Several GPUs (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are untested.

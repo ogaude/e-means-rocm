@@ -24,9 +24,10 @@ import torch
 KIB = 1024
 
 # Family facts. ``lds_bytes`` is the shared memory (LDS) a single workgroup may use.
-# Only gfx942's 64 KiB is confirmed (upstream comment in triton_assignment.py, ROCm
-# Triton); the others are a conservative 64 KiB until measured on hardware, which
-# keeps per-family tile tables (W6) inside a budget that is known to exist.
+# Confirmed: gfx942 64 KiB (upstream comment in triton_assignment.py, ROCm Triton) and
+# gfx1200 64 KiB (shared_memory_per_block and Triton max_shared_mem on an RX 9060 XT,
+# ROCm 10.1). cdna4 and rdna3 use a conservative 64 KiB until measured on hardware,
+# which keeps per-family tile tables (W6) inside a budget that is known to exist.
 #
 # ``fp32_matrix``: an FP32 matrix instruction exists (MFMA on CDNA; RDNA has none,
 # so FP32 tl.dot is scalar there).
@@ -40,7 +41,7 @@ _FAMILIES = {
                   fp32_matrix=True, native_fp8=True),
     "rdna3": dict(wavefront=32, lds_bytes=64 * KIB, lds_confirmed=False,
                   fp32_matrix=False, native_fp8=False),
-    "rdna4": dict(wavefront=32, lds_bytes=64 * KIB, lds_confirmed=False,
+    "rdna4": dict(wavefront=32, lds_bytes=64 * KIB, lds_confirmed=True,
                   fp32_matrix=False, native_fp8=True),
 }
 
@@ -173,11 +174,12 @@ GRAPH_REPLAY_ENV = "EMEANS_ROCM_GRAPH_REPLAY"
 def graph_replay_supported(device):
     """Whether training may use CUDA-graph capture and replay on this device.
 
-    NVIDIA: always, as upstream. ROCm: off by default until graph capture
-    (CUDAGraph, MemPool, thread-local capture mode) is verified on the pinned
-    ROCm PyTorch; set EMEANS_ROCM_GRAPH_REPLAY=1 to opt in. With replay off,
-    training runs the existing eager loop, which gives identical results.
-    ``device`` is accepted for a later per-family decision.
+    NVIDIA: always, as upstream. ROCm: off by default; set EMEANS_ROCM_GRAPH_REPLAY=1
+    to opt in. With replay off, training runs the existing eager loop, which gives
+    identical results. Verified on gfx1200 (RX 9060 XT, ROCm 10.1): capture and replay
+    work, all replay tests pass, and deterministic-mode runs are bit-identical to eager,
+    but replay gave no measurable speed-up there, so eager stays the default until a
+    family shows a gain. ``device`` is accepted for that per-family decision.
     """
     if not is_rocm():
         return True

@@ -47,7 +47,9 @@ class ArchFamilyTest(unittest.TestCase):
         self.assertEqual((rx.family, rx.wavefront), ("rdna4", 32))
         self.assertFalse(rx.fp32_matrix)
         self.assertTrue(rx.native_fp8)
-        self.assertFalse(rx.lds_confirmed)
+        self.assertTrue(rx.lds_confirmed)        # measured on gfx1200
+        self.assertFalse(dp.profile_for_arch("gfx950").lds_confirmed)
+        self.assertFalse(dp.profile_for_arch("gfx1100").lds_confirmed)
 
         self.assertTrue(dp.profile_for_arch("gfx950").native_fp8)
         self.assertFalse(dp.profile_for_arch("gfx1100").native_fp8)

@@ -72,7 +72,9 @@ def run_case(name, rows, d, k, epochs):
     centroids, labels = model.train(x)
     torch.cuda.synchronize()
     out["seconds"] = round(time.time() - t0, 3)
-    out["backend_used"] = getattr(model, "assignment_backend", None)
+    recipe = getattr(model, "recipe", None) or {}
+    out["backend_used"] = recipe.get("assignment_backend")
+    out["representation"] = recipe.get("representation")
     out["centroids_finite"] = bool(torch.isfinite(torch.as_tensor(centroids)).all())
     obj = getattr(model, "obj", None)
     out["obj"] = float(obj.sum()) if obj is not None else None
@@ -115,7 +117,8 @@ def main():
             r = {"case": name, "status": "TIMEOUT", "error": "no result in %ds" % a.timeout}
         rows.append(r)
         print("%-26s %-8s %s" % (name, r["status"],
-              ("%ss backend=%s obj=%s" % (r.get("seconds"), r.get("backend_used"), r.get("obj")))
+              ("%ss backend=%s repr=%s obj=%s" % (r.get("seconds"), r.get("backend_used"),
+                                                  r.get("representation"), r.get("obj")))
               if r["status"] == "ok" else r.get("error", "")), flush=True)
     with open(a.out, "w") as f:
         for r in rows:

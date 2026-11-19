@@ -4,18 +4,20 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: work in progress, not yet run on AMD hardware.** All changes so far are verified by
-> CPU tests and by compiling the kernels for AMD targets and inspecting the generated code.
-> The first GPU runs (RX 9060 XT, then MI300X) are the next step.
+> **Status: work in progress. Running on RX 9000 (gfx1200); MI300X next.** On an RX 9060 XT
+> (ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every FP32/FP16/BF16 path trains,
+> the e-means test suite passes (one known upstream failure, below), the rewritten kernels match
+> PyTorch bit for bit, and Triton is 2.2× to 4× faster than PyTorch for BF16 and FP16.
+> gfx942 (MI300X) has not been run yet; gfx950 and gfx11xx are compile-checked only.
 
 ## Target GPUs
 
 | Family | Architecture | Example GPUs | Plan |
 |---|---|---|---|
-| CDNA 3 | gfx942 | MI300X, MI325X | run on hardware |
+| CDNA 3 | gfx942 | MI300X, MI325X | hardware run planned |
 | CDNA 4 | gfx950 | MI350 series | compile-checked |
 | RDNA 3 | gfx11xx | RX 7000 series | compile-checked |
-| RDNA 4 | gfx120x | RX 9000 series | run on hardware |
+| RDNA 4 | gfx120x | RX 9000 series | **runs**, tested on RX 9060 XT |
 
 Sibling chips (gfx1101, gfx1201, ...) are matched by family. Other AMD GPUs fall back to native
 FP32 through PyTorch, which upstream already supports.
@@ -30,7 +32,7 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 | Kernels | The 10 PTX inline-assembly snippets in the EMA-update, split and FP8-cast kernels are replaced by plain Triton arithmetic. With fusion off it compiles to the same `.rn` instructions on NVIDIA, and to valid code on all four AMD families. |
 | Device detection | New `device_profile.py`: tells NVIDIA from AMD (ROCm reports both as `"cuda"`) and maps AMD chips to a family with its wavefront size, LDS budget and matrix-instruction support. |
 | Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. CuTe and TMA descriptors are never selected on AMD. |
-| Graph replay | Training uses the eager loop on ROCm until CUDA-graph capture is verified (same results, only speed differs); `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
+| Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
 | Errors | FP8 and INT8 on AMD raise an error that says support is planned. |
 | Tests | Vendor-aware skips replace the blanket ROCm skips; new GPU-free compile tests and bit-level Triton-vs-PyTorch checks. |
 
@@ -76,7 +78,9 @@ python -c "import faiss.contrib.e_means as m; print(m.__file__)"   # should poin
 ```
 
 Recorded development stack: ROCm 10.1.0, Python 3.14, torch 2.14.0+rocm10.1.0,
-triton 3.8.0+rocm10.1.0, faiss-cpu 1.16.0, on an RX 9060 XT (gfx1200, 32 CUs, wave32).
+triton 3.8.0+rocm10.1.0, faiss-cpu 1.16.0, on an RX 9060 XT (gfx1200, 32 CUs, wave32, 64 KiB
+LDS per workgroup, 16 GB). PyTorch reports `multi_processor_count = 16` there: RDNA counts
+work-group processors (two CUs each).
 
 ## Running the tests
 
@@ -116,16 +120,17 @@ rewrite; see its README.
 
 | Item | Status |
 |---|---|
-| Environment and offline compile checks | done; GPU checks pending |
-| PTX inline assembly replaced by plain Triton | done (compile-verified) |
-| Device profile and backend selection | done |
+| Environment, offline compile checks, device facts | done (gfx1200) |
+| PTX inline assembly replaced by plain Triton | done; bit-equal to PyTorch on gfx1200 |
+| Device profile and backend selection | done; Triton selected by default on gfx1200 |
 | NVIDIA-only Triton features fenced off on AMD | done |
-| Graph-replay guard (eager by default on ROCm) | done; capture check pending |
-| Vendor-aware test skips and bit-level numerics tests | done; first GPU run pending |
+| Graph-replay guard (eager by default on ROCm) | done; replay verified on gfx1200, no speed-up |
+| Vendor-aware test skips and bit-level numerics tests | done; passing on gfx1200 |
 | Documentation | done |
-| First runs on RX 9060 XT and MI300X | next |
-| Per-family tuning (tiles, stages, warps; FP32 Triton vs PyTorch on RX) | needs measurements |
-| Native FP16/BF16 PyTorch fallback on ROCm | needs a hardware check |
+| RX 9060 XT runs | done |
+| MI300X runs (gfx942) | next |
+| Per-family tuning (tiles, stages, warps) | needs measurements; FP32 on RX settled (Triton ≥ PyTorch) |
+| Native FP16/BF16 PyTorch fallback on ROCm | `addmm(out_dtype=)` works on gfx1200; to wire up |
 | Multi-GPU | out of scope ("expected to work, untested") |
 
 Acceptance for v0.1: the default `Emeans(d, k).train(x)` uses Triton on gfx1200 and gfx942;
