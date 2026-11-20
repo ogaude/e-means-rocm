@@ -65,12 +65,14 @@ _INT8_D_ALIGNMENT = 16
 # None on the FULL_D path (64 < d <= 128, reduced precision), where it is d rounded up.
 # rdna4 (gfx120x): chosen with tools/tune_assign.py on an RX 9060 XT (gfx1200, ROCm
 # 10.1, Triton 3.8); comments give the speed-up over the constants above from
-# `tune_assign.py --compare` (65,536 rows, d = 32 to 768, k = 1,024 to 16,384, BF16, FP16
-# and FP32: 81 shapes, none slower beyond timing noise, all with the same results).
-# Training (warm train(), 3 epochs) is 1.25-1.35x faster at 1M x 128 and larger.
-# d <= 64 was re-chosen in v0.2 over 2,048 to 262,144 rows: the earlier 65,536-row picks
-# fell to 0.6-0.9x of the constants at 2,048-32,768 rows with k = 1,024; this one stays
-# at 0.94-1.30x for every row count and k = 1,024 to 16,384 (1.0-1.7x at d = 32).
+# `tune_assign.py --compare` at 65,536 rows (v0.1). Re-measured 2026-11-20 with the
+# current table (d = 32 to 768, k = 1,024 to 16,384): BF16/FP16 1.06-2.80x at 65,536 rows
+# and 0.95-3.45x at 2,048 rows, FP32 1.04-1.40x; same labels, or distances equal within
+# FP32 rounding where tie order differs. BF16 training (warm train(), 3 epochs) is 1.0x
+# at 200k x 64, 1.26x at 1M x 128 and 1.80x at 4M x 128.
+# d <= 64 was re-chosen in v0.2 over 2,048 to 262,144 rows: the v0.1 picks ranged from
+# 0.55x to 1.72x of the constants (worst on small batches); this one stays at
+# 0.96-1.69x for every row count and k = 1,024 to 16,384.
 _AMD_DIRECT_CONFIGS = {
     "rdna4": {
         "reduced": (
@@ -84,7 +86,8 @@ _AMD_DIRECT_CONFIGS = {
         # FP8 (E4M3; rows and centroids are padded to d % 64 == 0), v0.2: swept with
         # `tune_assign.py --dtypes fp8` at 65,536 and 4,096 rows, then the candidates
         # timed from 2,048 to 262,144 rows (k = 1,024 and 16,384); these are the ones
-        # that hold up at every batch size. Speed-up over the constants:
+        # that hold up at every batch size (re-measured 2026-11-20 over d = 64 to 768:
+        # 1.22-2.74x at 65,536 rows, 0.99-2.75x at 2,048). Per rule, over the constants:
         "fp8": (
             (64, (32, 256, 64, 4, 1)),          # 0.98-1.87x
             (128, (32, 256, None, 4, 1)),       # FULL_D, 2.07-2.89x
@@ -142,11 +145,14 @@ _AMD_INT8_STAGES = {
 # rdna4 (gfx120x): chosen with `tools/tune_assign.py --dtypes int8` on an RX 9060 XT
 # (gfx1200, ROCm 10.1, Triton 3.8; 65,536 rows, d = 32 to 768, k = 1,024 to 16,384:
 # 21 shapes, every candidate with distances and labels identical to the default).
-# Comments give the speed-up over _int8_default_config. One stage won on every shape.
+# Comments give the speed-up over _int8_default_config from the sweep; re-measured
+# 2026-11-20 with the small-batch rules (d = 32 to 768): 2.99-8.51x at 65,536 rows,
+# 2.57-10.4x at 2,048 rows. One stage won on every shape.
 # Small-batch INT8 rules, (max_physical_d, max_rows, config), tried before
 # _AMD_INT8_CONFIGS for batches of at most max_rows rows: the main table was tuned at
-# 65,536 rows, and its 128-row tiles leave work-groups idle on small batches. rdna4: 1.2-1.9x at 2,048 rows; at 4,096 rows 0.96-1.09x
-# for d <= 128 and 0.93-1.0x at d = 256, hence the lower bound there.
+# 65,536 rows, and its 128-row tiles leave work-groups idle on small batches. rdna4:
+# 1.2-1.9x at 2,048 rows; at 4,096 rows 0.96-1.09x for d <= 128 and 0.93-1.0x at
+# d = 256, hence the lower bound there.
 _AMD_INT8_SMALL_CONFIGS = {
     "rdna4": (
         (128, 4096, (True, 64, 256, None, 8, 1)),
@@ -875,9 +881,10 @@ def _use_split_k(b, k, d, is_reduced, direct_block_d=_DIRECT_REDUCED_BLOCK_D):
 
 # AMD families whose direct kernel beats split-K beyond a few row blocks: split-K only
 # when cdiv(b, _SPLIT_K_BLOCK_B) is at most this many, on top of _use_split_k.
-# rdna4: `tools/tune_split_k.py` on an RX 9060 XT (BF16 and FP16, d = 64 to 768,
-# k = 4,096 to 65,536): split-K is 1.2-3.9x faster at 256 rows (4 blocks), but at
-# 1,024 rows 0.5-0.75x (except 1.03-1.16x at d = 128) and at 4,096 rows 0.27-0.42x,
+# rdna4: `tools/tune_split_k.py` on an RX 9060 XT (BF16, d = 64 to 768, k = 4,096 to
+# 65,536; re-measured 2026-11-20): split-K is 1.1-3.9x faster at 256 rows (4 blocks;
+# the one exception, 0.71x at d = 64 and k = 4,096, follows the v0.2 d <= 64 rule), but
+# at 1,024 rows 0.39-0.63x (except 1.02-1.14x at d = 128) and at 4,096 rows 0.26-0.41x,
 # where _use_split_k still chose it. Families without an entry keep _use_split_k.
 _AMD_SPLIT_K_MAX_ROW_BLOCKS = {"rdna4": 8}
 

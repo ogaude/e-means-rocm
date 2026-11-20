@@ -10,7 +10,8 @@ timeout. Inside it, one short train() compiles the kernels, then train() with
 
 Precisions: bf16 = FP32 input with the default FP32 -> BF16 cast (what
 Emeans(d, k).train(x) does); fp16 = FP32 input cast to FP16; fp32 = FP32 data with
-no quantizer. Backends: triton, native (PyTorch). Replay 1 sets
+no quantizer; int8 / fp8 = FP32 data encoded once with a calibrated Int8Quantizer /
+Fp8Quantizer, trained on the codes (Triton only: the PyTorch backend has no byte path). Backends: triton, native (PyTorch). Replay 1 sets
 EMEANS_ROCM_GRAPH_REPLAY=1 (ignored on NVIDIA, where replay is always on).
 
 Results: a table on stdout and JSON lines in --out.
@@ -27,12 +28,22 @@ def run_case(rows, d, k, precision, backend, epochs, repeat):
     import torch
     from faiss.contrib.e_means import quantizer
     from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans
+    from faiss.contrib.e_means.quantizer_fp8 import Fp8Quantizer
+    from faiss.contrib.e_means.quantizer_int8 import Int8Quantizer
 
     torch.manual_seed(0)
     x = torch.randn(rows, d, device="cuda")
+    data, byte_q = x, None
+    if precision in ("int8", "fp8"):
+        byte_q = (Int8Quantizer if precision == "int8" else Fp8Quantizer)(d)
+        byte_q.train(x)
+        data = byte_q.compute_codes(x)  # byte quantizers train on their codes
+
     def train(nepochs):
         kwargs = dict(assignment_backend=backend)
-        if precision == "fp32":
+        if byte_q is not None:
+            kwargs["quantizer"] = byte_q
+        elif precision == "fp32":
             kwargs["quantizer"] = None
         elif precision == "fp16":
             kwargs["quantizer"] = quantizer.CastQuantizer(d, torch.float16)
@@ -41,7 +52,7 @@ def run_case(rows, d, k, precision, backend, epochs, repeat):
         model = QuantizedEmeans(d, k, nepochs=nepochs, **kwargs)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        model.train(x)
+        model.train(data)
         torch.cuda.synchronize()
         return time.perf_counter() - t0, model
 
@@ -81,6 +92,9 @@ def main():
     ap.add_argument("--out", default="bench_train.jsonl")
     ap.add_argument("--case", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    unknown = set(a.precisions) - {"bf16", "fp16", "fp32", "int8", "fp8"}
+    if unknown:
+        ap.error("unknown precision(s): %s" % ", ".join(sorted(unknown)))
 
     if a.case:
         shape, precision, backend = a.case.split(",")
@@ -93,6 +107,8 @@ def main():
             for precision in a.precisions:
                 for replay in a.replay:
                     for backend in a.backends:
+                        if precision in ("int8", "fp8") and backend != "triton":
+                            continue  # no PyTorch byte path
                         env = dict(os.environ, EMEANS_ROCM_GRAPH_REPLAY=str(replay))
                         cmd = [sys.executable, __file__, "--case",
                                "%s,%s,%s" % (shape, precision, backend),
