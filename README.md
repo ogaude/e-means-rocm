@@ -34,7 +34,7 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 | Area | Change |
 |---|---|
 | Kernels | The 10 PTX inline-assembly snippets in the EMA-update, split and FP8-cast kernels are replaced by plain Triton arithmetic. With fusion off it compiles to the same `.rn` instructions on NVIDIA, and to valid code on all four AMD families. |
-| Tuning | Per-family assignment-kernel settings in `triton_assignment.py`, all tuned on RDNA4 with identical results. FP32/FP16/BF16 (`_AMD_DIRECT_CONFIGS`): kernel up to 2.7× faster (1.0× to 2.7× over 81 shapes, none slower), training 1.25× to 1.35× faster; the d ≤ 64 rule was re-chosen in v0.2 to hold up for small batches too. INT8 (`_AMD_INT8_CONFIGS`, plus `_AMD_INT8_SMALL_CONFIGS` for batches up to 4,096 rows): kernel 2.4× to 10× faster. Split-K (`_AMD_SPLIT_K_MAX_ROW_BLOCKS`): used only for small row counts, where it pays on RDNA4. Other families keep the NVIDIA-fitted constants. |
+| Tuning | Per-family assignment-kernel settings in `triton_assignment.py`, all tuned on RDNA4 with identical results. FP32/FP16/BF16 (`_AMD_DIRECT_CONFIGS`): kernel up to 2.7× faster (1.0× to 2.7× over 81 shapes, none slower), training 1.25× to 1.35× faster; the d ≤ 64 rule was re-chosen in v0.2 to hold up for small batches too. INT8 (`_AMD_INT8_CONFIGS`, plus `_AMD_INT8_SMALL_CONFIGS` for batches up to 4,096 rows): kernel 2.4× to 10× faster. FP8 (`"fp8"` rules in `_AMD_DIRECT_CONFIGS`): kernel 1.0× to 2.9× faster. Split-K (`_AMD_SPLIT_K_MAX_ROW_BLOCKS`): used only for small row counts, where it pays on RDNA4. Other families keep the NVIDIA-fitted constants. |
 | Device detection | New `device_profile.py`: tells NVIDIA from AMD (ROCm reports both as `"cuda"`) and maps AMD chips to a family with its wavefront size, LDS budget and matrix-instruction support. |
 | Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. The PyTorch backend also handles FP16/BF16 there (`torch.addmm(out_dtype=)`), as explicit `native` or as the fallback without Triton. CuTe and TMA descriptors are never selected on AMD. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
@@ -58,19 +58,18 @@ warm `train()` runs of 3 epochs with the tuned settings.
 
 At 200k × 64 vectors and 1,024 centroids the speed-ups are 2.1× (BF16, FP16) and 1.6× (FP32).
 
-INT8 (v0.2, tuned settings) against the default BF16, same benchmark:
+INT8 and FP8 (v0.2, tuned settings) against the default BF16, same benchmark:
 
-| Data | BF16 | INT8 | INT8 speed-up |
-|---|---|---|---|
-| 1M × 64, 4,096 centroids | 0.120 s | 0.104 s | 1.15× |
-| 1M × 128, 4,096 centroids | 0.235 s | 0.197 s | 1.19× |
-| 1M × 768, 4,096 centroids | 1.180 s | 1.098 s | 1.07× |
-| 4M × 128, 16,384 centroids | 1.497 s | 1.092 s | 1.37× |
+| Data | BF16 | INT8 | FP8 | INT8 speed-up | FP8 speed-up |
+|---|---|---|---|---|---|
+| 1M × 64, 4,096 centroids | 0.121 s | 0.104 s | 0.103 s | 1.16× | 1.18× |
+| 1M × 128, 4,096 centroids | 0.232 s | 0.196 s | 0.171 s | 1.19× | 1.36× |
+| 1M × 768, 4,096 centroids | 1.179 s | 1.099 s | 0.880 s | 1.07× | 1.34× |
+| 4M × 128, 16,384 centroids | 1.494 s | 1.088 s | 1.143 s | 1.37× | 1.31× |
 
-Final losses agree with BF16 to within 0.06%. FP8 (v0.2, not tuned yet) is 1.02× to 1.08× faster
-than BF16 at 1M vectors and 4,096 centroids but 0.78× at 4M × 128 with 16,384 centroids, with
-final losses within 0.1% of BF16. (The BF16 time at 1M × 128 differs from the table
-above, 0.235 s vs 0.207 s: separate runs on a desktop card.)
+Final losses agree with BF16 to within 0.08% for both. Before tuning, FP8 was 0.79× to 1.08× of
+BF16 and INT8 0.86×. (The BF16 time at 1M × 128 differs from the table above, 0.232 s vs
+0.207 s: separate runs on a desktop card.)
 
 - **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 3.1× the
   time of BF16 here. Triton is still the faster FP32 path, so it stays the automatic choice.
@@ -197,7 +196,7 @@ python tools/tune_split_k.py                           # direct vs split-K on sm
 |---|---|---|
 | **v0.1** (released) | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | local RX 9060 XT |
 | v0.2 | MI300X (gfx942) validation and tuning; INT8 on all four families; native FP8 on gfx120x and gfx950; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) and RX 9060 XT |
-| v0.3 | FP8 tuning; optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X |
+| v0.3 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X |
 | v0.4 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) |
 
 Native FP8 on gfx120x and gfx950 moved from v0.3 into v0.2 while the cloud session waits.
@@ -236,7 +235,8 @@ Acceptance for v0.1, on gfx1200:
 | RDNA4 split-K cap | done: split-K only up to 512 rows on gfx120x; the NVIDIA-fitted rule chose it up to 4,096 to 8,192 rows, where it is 2.4× to 3.9× slower on gfx1200 |
 | IVF test on OpenBLAS builds | fixed (test tolerance; see Running the tests) |
 | RDNA4 small-batch settings | done: BF16/FP16 d ≤ 64 re-chosen (was down to 0.6× of upstream on small batches), INT8 small-batch rules |
-| FP8 on gfx950 and gfx120x (moved from v0.3) | done on gfx1200: tests pass eager and with replay, encode exact for all FP32 values up to 448, `ldexp` replaced by an exact power-of-two multiply; not tuned yet |
+| FP8 on gfx950 and gfx120x (moved from v0.3) | done on gfx1200: tests pass eager and with replay, encode exact for all FP32 values up to 448, `ldexp` replaced by an exact power-of-two multiply |
+| RDNA4 FP8 tuning table | done: FP8 assignment kernel 1.0× to 2.9× faster than the NVIDIA-fitted settings from 2,048 to 262,144 rows; FP8 training now 1.18× to 1.36× faster than BF16 (it was 0.79× to 1.08×) |
 | MI300X validation and tuning | scripts ready (`tools/gpu_session/`); cloud session not run yet |
 | Hand-written backend gate | measurement script ready (`tools/gemm_gate.py`); runs in the same session |
 

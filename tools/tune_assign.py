@@ -8,6 +8,7 @@ within FP32 rounding), and reports the time per assignment call.
     python tools/tune_assign.py --dtypes bf16 --d 64 128 --k 4096 --top 5
     python tools/tune_assign.py --compare               # upstream vs per-family table only
     python tools/tune_assign.py --dtypes int8           # INT8 kernel (_assign_int8_kernel)
+    python tools/tune_assign.py --dtypes fp8 --d 64 128 256 768   # FP8 (E4M3), d % 64 == 0
 
 "upstream" is the configuration from the module constants (what NVIDIA uses);
 "table" is what _launch_assignment picks on this GPU (_AMD_DIRECT_CONFIGS, or the
@@ -31,7 +32,8 @@ import triton.testing
 
 from faiss.contrib.e_means import triton_assignment as ta
 
-DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32,
+          "fp8": torch.float8_e4m3fn}
 
 
 def _family():
@@ -90,7 +92,8 @@ def int8_data(rows, d, k):
 def table(dtype, d):
     """The direct-kernel configuration _launch_assignment picks on this GPU."""
     reduced = dtype != torch.float32
-    tuned = ta._amd_direct_config(torch.device("cuda"), reduced, d)
+    tuned = ta._amd_direct_config(torch.device("cuda"), reduced, d,
+                                  fp8=dtype == torch.float8_e4m3fn)
     if tuned is None:
         return upstream(dtype, d)
     bb, bk, bd, w, s = tuned
@@ -106,6 +109,11 @@ def upstream(dtype, d):
         bb, bk, w, s = ta._FULL_D_CONFIG
         return dict(BLOCK_B=bb, BLOCK_K=bk, BLOCK_D=max(16, triton.next_power_of_2(d)),
                     FULL_D=True, num_warps=w, num_stages=s)
+    if dtype == torch.float8_e4m3fn:  # as _launch_assignment: no 128-row tile, wider D
+        bd = (128 if triton.cdiv(d, 128) * 128 == triton.cdiv(d, 64) * 64
+              else ta._DIRECT_REDUCED_BLOCK_D)
+        return dict(BLOCK_B=ta._DIRECT_BLOCK_B, BLOCK_K=ta._DIRECT_BLOCK_K, BLOCK_D=bd,
+                    FULL_D=False, num_warps=8, num_stages=ta._NUM_STAGES)
     return dict(BLOCK_B=128 if reduced and d > ta._FULL_D_MAX_D and d % 16 == 0 else ta._DIRECT_BLOCK_B,
                 BLOCK_K=ta._DIRECT_BLOCK_K if reduced else 128,
                 BLOCK_D=ta._DIRECT_REDUCED_BLOCK_D if reduced else ta._DIRECT_FP32_BLOCK_D,
@@ -120,7 +128,9 @@ def candidates(dtype, d, quick):
         if full_d_ok:
             yield dict(BLOCK_B=bb, BLOCK_K=bk, BLOCK_D=max(16, triton.next_power_of_2(d)),
                        FULL_D=True, num_warps=w, num_stages=s)
-        for bd in ((32, 64, 128) if reduced else (16, 32, 64)):
+        widths = (16, 32, 64) if not reduced else (
+            (32, 64, 128, 256) if dtype == torch.float8_e4m3fn else (32, 64, 128))
+        for bd in widths:
             if bd > max(16, triton.next_power_of_2(d)):
                 continue
             yield dict(BLOCK_B=bb, BLOCK_K=bk, BLOCK_D=bd, FULL_D=False, num_warps=w, num_stages=s)
@@ -132,7 +142,8 @@ def launch(x, c, norm, dist, labels, cfg):
         x, c, norm, dist, labels, x.shape[0], c.shape[0], x.shape[1],
         x.stride(0), x.stride(1), c.stride(0), c.stride(1),
         BLOCK_B=cfg["BLOCK_B"], BLOCK_K=cfg["BLOCK_K"], BLOCK_D=cfg["BLOCK_D"],
-        FULL_D=cfg["FULL_D"], REDUCED=reduced, FP16=c.dtype == torch.float16, FP8=False,
+        FULL_D=cfg["FULL_D"], REDUCED=reduced, FP16=c.dtype == torch.float16,
+        FP8=c.dtype == torch.float8_e4m3fn,
         WIDE_CENTROID=False, SPHERICAL=False,
         num_warps=cfg["num_warps"], num_stages=cfg["num_stages"])
 
@@ -167,8 +178,9 @@ def main():
                     x, c, norm, dist, labels = int8_data(a.rows, d, k)
                     run, ref = int8_launch, int8_upstream(d)
                 else:
-                    x = torch.randn(a.rows, d, device="cuda").to(dtype)
-                    c = torch.randn(k, d, device="cuda").to(dtype)
+                    scale = 8.0 if dtype == torch.float8_e4m3fn else 1.0  # use E4M3's range
+                    x = (torch.randn(a.rows, d, device="cuda") * scale).to(dtype)
+                    c = (torch.randn(k, d, device="cuda") * scale).to(dtype)
                     norm = c.float().square().sum(1)
                     dist = torch.empty(a.rows, device="cuda")
                     labels = torch.empty(a.rows, device="cuda", dtype=torch.int64)

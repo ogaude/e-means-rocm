@@ -427,9 +427,9 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   (gfx120x). MI300 and RX 7000 would only emulate it through FP16 (saving memory, not time) and
   refuse FP8 with an error. On an RX 9060 XT the FP8 tests pass, the encode gives exactly
   PyTorch's codes for every FP32 value up to 448 in magnitude, and training ends within 0.1% of
-  BF16's loss. FP8 is 1.02× to 1.08× faster than BF16 at 1M vectors and 4,096 centroids, but
-  0.78× at 4M × 128 with 16,384 centroids: its tile settings are not tuned yet. MI350 is
-  compile-checked only.
+  BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training is 1.18× to 1.36× faster
+  than BF16 (1M × 64 to 4M × 128 vectors, 4,096 to 16,384 centroids). MI350 is compile-checked
+  only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.4× to 9× faster than with the NVIDIA-fitted settings,

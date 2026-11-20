@@ -158,7 +158,7 @@ class AmdTuningTableTest(unittest.TestCase):
                 self.assertIsNone(entries[-1][0], "%s/%s needs a catch-all rule" % (family, kind))
                 for d in range(1, 2049):
                     config = next(c for max_d, c in entries if max_d is None or d <= max_d)
-                    full_d = (kind == "reduced"
+                    full_d = (kind in ("reduced", "fp8")
                               and ta._DIRECT_REDUCED_BLOCK_D < d <= ta._FULL_D_MAX_D)
                     with self.subTest(family=family, kind=kind, d=d):
                         self.assertEqual(config[2] is None, full_d)
@@ -195,17 +195,20 @@ class AmdTuningTableTest(unittest.TestCase):
         sig = dict(x_ptr="*bf16", centroid_ptr="*bf16", centroid_norm_ptr="*fp32",
                    distance_ptr="*fp32", label_ptr="*i64", B="i32", K="i32", D="i32",
                    stride_xb="i64", stride_xd="i64", stride_ck="i64", stride_cd="i64")
+        rules = ta._AMD_DIRECT_CONFIGS["rdna4"]
         for kind, d in (("reduced", 32), ("reduced", 64), ("reduced", 128), ("reduced", 768),
-                        ("fp32", 32), ("fp32", 768)):
-            config = next(c for max_d, c in ta._AMD_DIRECT_CONFIGS["rdna4"][kind]
-                          if max_d is None or d <= max_d)
+                        ("fp32", 32), ("fp32", 768),
+                        ("fp8", 64), ("fp8", 128), ("fp8", 256), ("fp8", 768)):
+            if kind not in rules:
+                continue
+            config = next(c for max_d, c in rules[kind] if max_d is None or d <= max_d)
             block_b, block_k, block_d, warps, stages = config
             full = block_d is None
-            dtype = "bf16" if kind == "reduced" else "fp32"
+            dtype = {"reduced": "bf16", "fp32": "fp32", "fp8": "fp8e4nv"}[kind]
             s = dict(sig, x_ptr="*" + dtype, centroid_ptr="*" + dtype)
             cx = dict(BLOCK_B=block_b, BLOCK_K=block_k,
                       BLOCK_D=triton.next_power_of_2(d) if full else block_d, FULL_D=full,
-                      REDUCED=kind == "reduced", FP16=False, FP8=False, WIDE_CENTROID=False,
+                      REDUCED=kind != "fp32", FP16=False, FP8=kind == "fp8", WIDE_CENTROID=False,
                       x_desc=None, centroid_desc=None, SPHERICAL=False)
             s.update({name: "constexpr" for name in cx})
             with self.subTest(kind=kind, d=d):

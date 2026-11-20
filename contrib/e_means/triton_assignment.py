@@ -81,12 +81,24 @@ _AMD_DIRECT_CONFIGS = {
         "fp32": (
             (None, (64, 64, 16, 4, 3)),         # 1.2-1.7x
         ),
+        # FP8 (E4M3; rows and centroids are padded to d % 64 == 0), v0.2: swept with
+        # `tune_assign.py --dtypes fp8` at 65,536 and 4,096 rows, then the candidates
+        # timed from 2,048 to 262,144 rows (k = 1,024 and 16,384); these are the ones
+        # that hold up at every batch size. Speed-up over the constants:
+        "fp8": (
+            (64, (32, 256, 64, 4, 1)),          # 0.98-1.87x
+            (128, (32, 256, None, 4, 1)),       # FULL_D, 2.07-2.89x
+            (None, (64, 256, 64, 8, 1)),        # 1.37-2.21x
+        ),
     },
 }
 
 
-def _amd_direct_config(device, is_reduced, d):
-    """Tuned (BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages) on AMD, else None."""
+def _amd_direct_config(device, is_reduced, d, fp8=False):
+    """Tuned (BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages) on AMD, else None.
+
+    FP8 uses the family's "fp8" rules, or the constants when it has none.
+    """
     if torch.version.hip is None:
         return None
     from .device_profile import device_profile
@@ -94,7 +106,8 @@ def _amd_direct_config(device, is_reduced, d):
     rules = _AMD_DIRECT_CONFIGS.get(device_profile(device).family)
     if rules is None:
         return None
-    for max_d, config in rules["reduced" if is_reduced else "fp32"]:
+    kind = "fp8" if fp8 else "reduced" if is_reduced else "fp32"
+    for max_d, config in rules.get(kind, ()):
         if max_d is None or d <= max_d:
             return config
     return None
@@ -946,7 +959,7 @@ def _launch_assignment(
                 for t in (x, centroids)
             )
         )
-        tuned = None if is_fp8 else _amd_direct_config(x.device, is_reduced, d)
+        tuned = _amd_direct_config(x.device, is_reduced, d, fp8=is_fp8)
         if tuned is not None:
             block_b, block_k, block_d, num_warps, num_stages = tuned
             if full_d:
