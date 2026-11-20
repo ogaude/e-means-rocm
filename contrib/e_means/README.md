@@ -58,6 +58,10 @@ pip install faiss-cpu numpy
 python -c "import torch, triton; print(torch.__version__, torch.version.hip, triton.__version__)"
 ```
 
+The `faiss-cpu` wheel bundles the upstream copy of this package, which has no AMD support:
+replace it with this repository's `contrib/e_means` as shown in the
+[e-means-rocm Quick start](../../README.md#quick-start), or the AMD paths below are not used.
+
 ROCm PyTorch reports AMD GPUs as device type `"cuda"`, so the usual `device="cuda"` code runs
 unchanged. See the AMD notes under Kernels for what is supported.
 
@@ -407,7 +411,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - ² CuTe if you pass `assignment_backend="cute"`.
 - "no" means training is refused with an error at the start.
 - Install the packages required by the selected backend. Missing, broken or incompatible required software
-  raises an error; e-means does not switch to another assignment backend.
+  raises an error; e-means does not switch to another assignment backend. (One exception on AMD:
+  without Triton, the automatic choice on the four AMD families is PyTorch; see ⁴.)
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
 - ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
@@ -468,8 +473,8 @@ are in the table under Kernels, above.
 
 | Input numbers | CuTe kernels (H100) | Triton kernels | PyTorch kernels |
 |---|---|---|---|
-| Native FP32 (`quantizer=None`) | not supported | A100 or newer | CPU and any CUDA GPU |
-| FP16, BF16 | BF16 only | A100 or newer | A100 or newer |
+| Native FP32 (`quantizer=None`) | not supported | A100 or newer, AMD MI300/MI350/RX 7000/RX 9000 | CPU and any CUDA or ROCm GPU |
+| FP16, BF16 | BF16 only | A100 or newer, AMD MI300/MI350/RX 7000/RX 9000 | A100 or newer, AMD MI300/MI350/RX 7000/RX 9000 |
 | FP8 (E4M3) | yes | H100, B200, B300, AMD MI350/RX 9000 | not supported |
 | INT8, UINT8 | yes | A100, H100, B200, AMD MI300/MI350/RX 7000/RX 9000; dimension up to 43,919 | not supported |
 

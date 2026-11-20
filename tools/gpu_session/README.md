@@ -40,8 +40,9 @@ bash tools/gpu_session/run.sh 2>&1 | tee session.out
 ```
 
 `setup.sh` pins the same stack as v0.1 (torch 2.14.0+rocm10.1.0, wheel extra
-`device-gfx942` detected from `rocminfo`). The wheels bundle the ROCm runtime and only
-need the kernel driver. To change the version, set `TORCH_SPEC`. If the VM image (or a
+`device-gfx942` detected from `rocminfo`). The wheels pull in the ROCm user-space
+libraries as pip packages (`rocm-sdk-core`, `rocm-sdk-libraries`, `rocm-sdk-device-<gfx>` on the
+gfx1200 machine), so the VM should mostly need the amdgpu kernel driver; untested on MI300X. To change the version, set `TORCH_SPEC`. If the VM image (or a
 ROCm PyTorch container) already has a ROCm PyTorch you prefer, skip the venv with
 `USE_SYSTEM_TORCH=1 PYTHON=/path/to/python bash tools/gpu_session/setup.sh`, then run the
 session with the same `PYTHON=/path/to/python`.
