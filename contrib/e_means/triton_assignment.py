@@ -68,11 +68,13 @@ _INT8_D_ALIGNMENT = 16
 # `tune_assign.py --compare` (65,536 rows, d = 32 to 768, k = 1,024 to 16,384, BF16, FP16
 # and FP32: 81 shapes, none slower beyond timing noise, all with the same results).
 # Training (warm train(), 3 epochs) is 1.25-1.35x faster at 1M x 128 and larger.
+# d <= 64 was re-chosen in v0.2 over 2,048 to 262,144 rows: the earlier 65,536-row picks
+# fell to 0.6-0.9x of the constants at 2,048-32,768 rows with k = 1,024; this one stays
+# at 0.94-1.30x for every row count and k = 1,024 to 16,384 (1.0-1.7x at d = 32).
 _AMD_DIRECT_CONFIGS = {
     "rdna4": {
         "reduced": (
-            (32, (128, 64, 32, 4, 2)),          # 1.4-1.7x
-            (64, (64, 128, 32, 4, 2)),          # 1.0-1.3x
+            (64, (32, 256, 32, 4, 2)),          # all batch sizes, see above
             (128, (128, 64, None, 8, 1)),       # FULL_D, 1.6-2.4x
             (None, (64, 256, 64, 8, 2)),        # BLOCK_B 64, not 128: 2.1-2.7x
         ),
@@ -128,6 +130,16 @@ _AMD_INT8_STAGES = {
 # (gfx1200, ROCm 10.1, Triton 3.8; 65,536 rows, d = 32 to 768, k = 1,024 to 16,384:
 # 21 shapes, every candidate with distances and labels identical to the default).
 # Comments give the speed-up over _int8_default_config. One stage won on every shape.
+# Small-batch INT8 rules, (max_physical_d, max_rows, config), tried before
+# _AMD_INT8_CONFIGS for batches of at most max_rows rows: the main table was tuned at
+# 65,536 rows, and its 128-row tiles leave work-groups idle on small batches. rdna4: 1.2-1.9x at 2,048 rows; at 4,096 rows 0.96-1.09x
+# for d <= 128 and 0.93-1.0x at d = 256, hence the lower bound there.
+_AMD_INT8_SMALL_CONFIGS = {
+    "rdna4": (
+        (128, 4096, (True, 64, 256, None, 8, 1)),
+        (256, 2048, (True, 64, 128, 256, 8, 1)),
+    ),
+}
 _AMD_INT8_CONFIGS = {
     "rdna4": (
         (64, (True, 128, 128, None, 4, 1)),     # no padding of D to 128: 5.2-8.5x
@@ -152,13 +164,16 @@ def _int8_default_config(physical_d, family=None):
     return full_d, block_b, block_k, block_d, num_warps, num_stages
 
 
-def _int8_launch_config(physical_d, family=None):
+def _int8_launch_config(physical_d, family=None, rows=None):
     """INT8 assignment (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
 
     ``family`` is the AMD architecture family, or None on NVIDIA (upstream settings).
     Pure, so offline compile tests can check every family's configuration.
     """
-    for max_d, config in _AMD_INT8_CONFIGS.get(family, ()):
+    rules = tuple((max_d, config) for max_d, max_rows, config
+                  in _AMD_INT8_SMALL_CONFIGS.get(family, ())
+                  if rows is not None and rows <= max_rows)
+    for max_d, config in rules + _AMD_INT8_CONFIGS.get(family, ()):
         if max_d is None or physical_d <= max_d:
             full_d, block_b, block_k, block_d, num_warps, num_stages = config
             if full_d and block_d is None:
@@ -1167,7 +1182,7 @@ def assign_int8_rows(
 
         family = device_profile(x.device).family
     full_d, block_b, block_k, block_d, num_warps, num_stages = _int8_launch_config(
-        physical_d, family
+        physical_d, family, b
     )
     # The staged width is bounded and16-aligned by _int8_physical_d;
     # its CUDA allocation has aligned unit-stride rows. Check before staging.

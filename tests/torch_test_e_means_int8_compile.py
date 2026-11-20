@@ -73,6 +73,15 @@ class Int8LaunchConfigTest(unittest.TestCase):
                             self.assertTrue(MATRIX.search(kernel.asm["amdgcn"]),
                                             "no integer matrix instruction")
 
+    def test_small_batch_configurations_fit(self):
+        small = lambda physical_d, family: ta._int8_launch_config(physical_d, family, 1024)
+        for family, arch in ARCHS.items():
+            budget = profile_for_arch(arch).lds_bytes
+            for path, physical_d in PATHS.items():
+                with self.subTest(arch=arch, path=path):
+                    kernel = _compile(arch, physical_d, config=small)
+                    self.assertLessEqual(kernel.metadata.shared, budget)
+
     def test_stage_counts_are_the_largest_that_fit(self):
         for family, arch in ARCHS.items():
             budget = profile_for_arch(arch).lds_bytes

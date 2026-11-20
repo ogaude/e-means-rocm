@@ -49,8 +49,8 @@ def int8_upstream(d):
     return int8_cfg(*ta._int8_default_config(d, _family()))
 
 
-def int8_table(d):
-    return int8_cfg(*ta._int8_launch_config(d, _family()))
+def int8_table(d, rows=None):
+    return int8_cfg(*ta._int8_launch_config(d, _family(), rows))
 
 
 def int8_candidates(d, quick):
@@ -177,7 +177,7 @@ def main():
                 ref_labels, ref_dist = labels.clone(), dist.clone()
                 t_ref = triton.testing.do_bench(lambda: run(x, c, norm, dist, labels, ref))
                 if a.compare:
-                    cfg = int8_table(d) if int8 else table(dtype, d)
+                    cfg = int8_table(d, a.rows) if int8 else table(dtype, d)
                     run(x, c, norm, dist, labels, cfg)
                     torch.cuda.synchronize()
                     mismatch = int((labels != ref_labels).sum())

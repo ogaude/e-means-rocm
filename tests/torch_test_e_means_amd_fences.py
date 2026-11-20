@@ -179,8 +179,8 @@ class AmdTuningTableTest(unittest.TestCase):
         ta = self.ta
         with mock.patch.object(torch.version, "hip", "7.16"), self._on("gfx1201"):
             look = lambda reduced, d: ta._amd_direct_config(torch.device("cuda", 0), reduced, d)
-            self.assertEqual(look(True, 32), (128, 64, 32, 4, 2))
-            self.assertEqual(look(True, 64), (64, 128, 32, 4, 2))
+            self.assertEqual(look(True, 32), (32, 256, 32, 4, 2))
+            self.assertEqual(look(True, 64), (32, 256, 32, 4, 2))
             self.assertEqual(look(True, 96)[2], None)
             self.assertEqual(look(True, 768), (64, 256, 64, 8, 2))
             self.assertEqual(look(False, 768), (64, 64, 16, 4, 3))
