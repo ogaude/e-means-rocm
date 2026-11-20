@@ -27,22 +27,27 @@ def _check_fp8_range(peak, name):
 
 
 def _check_fp8_support(device):
-    """Reject devices that cannot execute the E4M3 assignment path."""
+    """Reject devices that cannot execute the E4M3 assignment path.
+
+    NVIDIA: SM90, SM100 and SM103, as upstream. AMD: the families with a native
+    OCP E4M3 matrix instruction (gfx950, gfx120x), with Triton installed.
+    """
     if getattr(torch, "float8_e4m3fn", None) is None:
         raise RuntimeError("PyTorch does not provide float8_e4m3fn")
     if device.type != "cuda":
         raise ValueError("float8_e4m3fn assignment requires a CUDA tensor")
     if getattr(torch.version, "hip", None) is not None:
-        raise RuntimeError(
-            "float8_e4m3fn assignment requires an NVIDIA SM90, SM100, or SM103 GPU; "
-            "AMD support is planned (e-means-rocm v0.3: gfx950 and gfx120x), "
-            "use BF16, FP16 or FP32 for now"
-        )
+        from .device_profile import AMD_FP8_TARGETS, amd_fp8_supported
+
+        if not amd_fp8_supported(device):
+            raise RuntimeError(
+                "float8_e4m3fn assignment requires an NVIDIA SM90, SM100, or SM103 GPU, "
+                "or an AMD %s GPU with Triton installed; use BF16, FP16 or FP32 here"
+                % AMD_FP8_TARGETS
+            )
+        return
     capability = torch.cuda.get_device_capability(device)
-    if (
-        getattr(torch.version, "hip", None) is not None
-        or capability not in ((9, 0), (10, 0), (10, 3))
-    ):
+    if capability not in ((9, 0), (10, 0), (10, 3)):
         raise RuntimeError(
             "float8_e4m3fn assignment requires an NVIDIA SM90, SM100, "
             "or SM103 GPU"

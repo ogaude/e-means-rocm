@@ -8,6 +8,7 @@ Skips use these instead:
 * nvidia_sm80()      NVIDIA SM80 or later (the upstream condition, exactly).
 * amd_triton_gpu()   AMD target family (gfx942, gfx950, gfx11xx, gfx120x) with Triton.
 * triton_gpu()       either of the above with Triton: the Triton backend runs here.
+* amd_fp8_gpu()      AMD family with a native E4M3 matrix instruction (gfx950, gfx120x).
 * native_reduced_gpu() native PyTorch FP16/BF16 assignment runs here.
 * graph_replay_gpu() a GPU on which training uses CUDA-graph replay (on ROCm only
                      with EMEANS_ROCM_GRAPH_REPLAY=1; see device_profile).
@@ -34,6 +35,14 @@ def amd_triton_gpu():
     from faiss.contrib.e_means.device_profile import amd_triton_supported
 
     return amd_triton_supported("cuda")
+
+
+def amd_fp8_gpu():
+    if not (torch.cuda.is_available() and torch.version.hip is not None):
+        return False
+    from faiss.contrib.e_means.device_profile import amd_fp8_supported
+
+    return amd_fp8_supported("cuda")
 
 
 def triton_gpu():

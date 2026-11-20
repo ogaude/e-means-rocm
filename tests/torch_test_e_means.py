@@ -30,21 +30,21 @@ from e_means_test_utils import (
 )
 
 from e_means_gpu_conditions import (
-    amd_triton_gpu, graph_replay_gpu, native_reduced_gpu, nvidia_sm80, triton_gpu,
+    amd_fp8_gpu, amd_triton_gpu, graph_replay_gpu, native_reduced_gpu, nvidia_sm80, triton_gpu,
 )
 
-# NVIDIA SM80+ with Triton, exactly the upstream condition. FP8 stays NVIDIA-only:
-# on ROCm get_device_capability() returns gfx numbers, and AMD FP8 assignment is
-# not supported before v0.3. INT8 runs on NVIDIA SM80/SM90/SM100 and on the AMD
-# target families (v0.2).
+# NVIDIA SM80+ with Triton, exactly the upstream condition (on ROCm
+# get_device_capability() returns gfx numbers, so the vendor is checked first).
+# INT8 runs on NVIDIA SM80/SM90/SM100 and on the AMD target families; FP8 on NVIDIA
+# SM90/SM100/SM103 and on the AMD families with native E4M3 (gfx950, gfx120x).
 TRITON_NVIDIA = nvidia_sm80() and importlib.util.find_spec("triton") is not None
 # The Triton backend runs here: NVIDIA SM80+ or an AMD target family.
 TRITON_CUDA = triton_gpu()
 GRAPH_REPLAY = graph_replay_gpu()
 # Native PyTorch FP16/BF16 assignment: NVIDIA SM80+ or an AMD target family.
 NATIVE_REDUCED = native_reduced_gpu()
-FP8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
-            in ((9, 0), (10, 0), (10, 3)))
+FP8_CUDA = ((TRITON_NVIDIA and torch.cuda.get_device_capability()
+             in ((9, 0), (10, 0), (10, 3))) or amd_fp8_gpu())
 INT8_CUDA = ((TRITON_NVIDIA and torch.cuda.get_device_capability()
               in ((8, 0), (9, 0), (10, 0))) or amd_triton_gpu())
 
@@ -1312,13 +1312,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "float8_e4m3fn"):
                 Fp8Quantizer(1).train(torch.zeros(2, 1))
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((9, 0), (10, 0), (10, 3))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified FP8 CUDA required",
-    )
+    @unittest.skipUnless(FP8_CUDA, "qualified FP8 CUDA required")
     def test_fp8_native_jit_decoded_lifecycle(self):
         for backend in self._fp8_backends():
             with self.subTest(backend=backend):
@@ -1373,13 +1367,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
                 torch.testing.assert_close(raw.centroids, codes.float().reshape(2, 2, 1).mean(1))
                 torch.testing.assert_close(raw.assignments, native.assignments, rtol=0, atol=0)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((9, 0), (10, 0), (10, 3))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified FP8 CUDA required",
-    )
+    @unittest.skipUnless(FP8_CUDA, "qualified FP8 CUDA required")
     def test_fp8_long_positive_selected_distances(self):
         for backend in self._fp8_backends():
             with self.subTest(backend=backend):
@@ -2186,7 +2174,9 @@ if cuda_supported:
         self.assertFalse(q.centered)
         centroids, usage = torch.zeros((2, 1)), torch.ones(2)
         kernel = mock.MagicMock()
-        with mock.patch.object(backend, '_fp8_libdevice', None), \
+        # NVIDIA (pinned, so this also runs under ROCm PyTorch): scaled FP8 needs ldexp.
+        with mock.patch.object(torch.version, 'hip', None), \
+             mock.patch.object(backend, '_fp8_libdevice', None), \
              mock.patch.object(torch.Tensor, 'is_cuda', new_callable=mock.PropertyMock, return_value=True), \
              mock.patch.object(backend, '_write_float_splits_kernel', kernel):
             with self.assertRaises(ImportError):
@@ -2197,6 +2187,18 @@ if cuda_supported:
                 self.assertTrue(backend._write_float_splits(
                     centroids, usage, [0], [1], torch.float8_e4m3fn, 1e-4))
             self.assertEqual(kernel.__getitem__.return_value.call_count, 1)
+        # AMD: an exact power-of-two multiply replaces ldexp, so no libdevice needed.
+        kernel = mock.MagicMock()
+        with mock.patch.object(torch.version, 'hip', '7.16'), \
+             mock.patch.object(backend, '_fp8_libdevice', None), \
+             mock.patch.object(torch.Tensor, 'is_cuda', new_callable=mock.PropertyMock, return_value=True), \
+             mock.patch.object(backend, '_write_float_splits_kernel', kernel), \
+             mock.patch.object(torch.cuda, 'device', return_value=nullcontext()):
+            self.assertTrue(backend._write_float_splits(
+                centroids, usage, [0], [1], torch.float8_e4m3fn, 1e-4, q))
+        launch = kernel.__getitem__.return_value
+        self.assertEqual(launch.call_count, 1)
+        self.assertIs(launch.call_args.kwargs['LIBDEVICE_LDEXP'], False)
 
     @unittest.skipUnless(TRITON_NVIDIA and INT8_CUDA
                          and torch.cuda.get_device_capability() == (9, 0),

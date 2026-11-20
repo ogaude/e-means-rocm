@@ -77,9 +77,11 @@ EMA_SIG_HOST = dict(EMA_SIG, alpha=F32, decay=F32)
 SPLIT_SIG = dict(centroids=P, usage=P, source="*i64", target="*i64", d=I32, epsilon=F32,
                  scale=F32, decode_exponent="*i32")
 SPLIT_CASES = {
-    "fp32": dict(BF16=False, FP8=False, SCALED=False, BLOCK_D=128),
-    "bf16": dict(BF16=True, FP8=False, SCALED=False, BLOCK_D=128),
-    "fp8 unscaled": dict(BF16=False, FP8=True, SCALED=False, BLOCK_D=128),
+    "fp32": dict(BF16=False, FP8=False, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
+    "bf16": dict(BF16=True, FP8=False, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
+    "fp8 unscaled": dict(BF16=False, FP8=True, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
+    # AMD: ldexp replaced by an exact power-of-two multiply (no libdevice ldexp there).
+    "fp8 scaled": dict(BF16=False, FP8=True, SCALED=True, BLOCK_D=128, LIBDEVICE_LDEXP=False),
 }
 CAST_SIG = dict(source=P, out="*fp8e4nv", squares=P, peak="*i32", bias=P, k=I32, d=I32, scale=F32)
 CAST_CASES = {

@@ -1477,6 +1477,22 @@ def ema_update(sums, counts, centroids, usage, alpha, decay, replace_usage):
 
 
 @triton.jit
+def _pow2(exponent):
+    """Exact FP32 2**exponent for -149 <= exponent <= 127, built from its bits.
+
+    Multiplying a finite value by it rounds the exact product once, which is what
+    ldexp computes (torch.ldexp is itself value * 2**exponent). The FP8 decode
+    exponents stay within [-127, 127] (Fp8Quantizer.fit). Used on AMD, whose
+    Triton library has no ldexp.
+    """
+    exponent = exponent.to(tl.int32)
+    normal = ((exponent + 127) << 23).to(tl.float32, bitcast=True)
+    subnormal = (tl.full(exponent.shape, 1, tl.int32) << tl.maximum(exponent + 149, 0)).to(
+        tl.float32, bitcast=True)
+    return tl.where(exponent >= -126, normal, subnormal)
+
+
+@triton.jit
 def _write_float_splits_kernel(
     centroids,
     usage,
@@ -1490,6 +1506,7 @@ def _write_float_splits_kernel(
     FP8: tl.constexpr,
     SCALED: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    LIBDEVICE_LDEXP: tl.constexpr = True,
 ):
     # One pair owns both rows; hold donor operands in SSA until final stores.
     donor = tl.load(source + tl.program_id(0)).to(tl.int64)
@@ -1528,7 +1545,10 @@ def _write_float_splits_kernel(
     if FP8:
         neighbor = moved.to(tl.uint8).to(tl.float8e4nv, bitcast=True).to(tl.float32)
         if SCALED:
-            neighbor = _fp8_libdevice.ldexp(neighbor, tl.load(decode_exponent))
+            if LIBDEVICE_LDEXP:  # NVIDIA, as upstream
+                neighbor = _fp8_libdevice.ldexp(neighbor, tl.load(decode_exponent))
+            else:  # AMD: exact power-of-two multiply, same single rounding
+                neighbor = neighbor * _pow2(tl.load(decode_exponent))
         collapsed = collapsed & (tl.abs(neighbor) < float("inf"))
     else:
         neighbor = (moved << 16 if BF16 else moved).to(tl.float32, bitcast=True)
@@ -1556,7 +1576,9 @@ def _write_float_splits(centroids, usage, source, target, dtype, epsilon, quanti
             or centroids.dtype != torch.float32 or usage.dtype != torch.float32
             or not centroids.is_contiguous() or not usage.is_contiguous()):
         return False
-    if quantizer is not None and not callable(getattr(_fp8_libdevice, "ldexp", None)):
+    libdevice_ldexp = torch.version.hip is None
+    if (quantizer is not None and libdevice_ldexp
+            and not callable(getattr(_fp8_libdevice, "ldexp", None))):
         raise ImportError("scaled FP8 centroid splitting requires callable "
                           "triton.language.extra.cuda.libdevice.ldexp")
     with torch.cuda.device(centroids.device):
@@ -1566,6 +1588,7 @@ def _write_float_splits(centroids, usage, source, target, dtype, epsilon, quanti
             None if quantizer is None else quantizer._decode_exponent,
             BF16=dtype is torch.bfloat16, FP8=fp8, SCALED=quantizer is not None,
             BLOCK_D=triton.next_power_of_2(centroids.shape[1]),
+            LIBDEVICE_LDEXP=libdevice_ldexp,
             num_warps=4, enable_fp_fusion=False,
         )
     torch.autograd.graph.increment_version((centroids, usage))

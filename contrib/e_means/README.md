@@ -397,7 +397,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 | Native FP32 (`quantizer=None`) | Triton | Triton | Triton | Triton | Triton | PyTorch | Triton | Triton³ |
 | BF16 | **CuTe** | Triton | Triton | Triton | Triton | no | Triton | Triton |
 | FP16 | Triton | Triton | Triton | Triton | Triton | no | Triton | Triton |
-| FP8 (`float8_e4m3fn`) | Triton² | Triton | Triton | no | no | no | no⁵ | no⁵ |
+| FP8 (`float8_e4m3fn`) | Triton² | Triton | Triton | no | no | no | MI350: Triton⁵; MI300: no | RX 9000: Triton⁵; RX 7000: no |
 | INT8, UINT8 | Triton² | Triton | no | Triton | no | no | Triton⁶ | Triton⁶ |
 | float64 | no | no | no | no | no | no | no | no |
 
@@ -414,17 +414,22 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   BF16 there: 3.1× on an RX 9060 XT (1M × 128 vectors, 4,096 centroids). Keep the default BF16
   conversion on these cards. Triton is still faster than PyTorch for native FP32 (1.6×
   measured), so it stays the automatic choice.
-- ⁴ AMD support in this fork (v0.1) is validated on RX 9000. On an RX 9060 XT (gfx1200, ROCm
+- ⁴ AMD support in this fork (v0.1, INT8 in v0.2) is validated on RX 9000. On an RX 9060 XT (gfx1200, ROCm
   10.1) every precision above trains, the e-means tests pass, and Triton is 2.1× to 4.8× faster
   than PyTorch for BF16 and FP16. RX 9000 GPUs use tile settings tuned for them, which make the
   assignment kernel up to 2.7× faster and training 1.25× to 1.35× faster than the NVIDIA-fitted
-  defaults. MI300 validation and tuning are planned next; MI350 and RX 7000 are compile-checked
+  defaults (INT8: see ⁶). MI300 validation and tuning are planned next; MI350 and RX 7000 are compile-checked
   only and use the NVIDIA-fitted tile settings.
   Other AMD GPUs (for example MI200, gfx90a) run native FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
   On the four families without Triton, the automatic choice uses the slower PyTorch path (BF16 by
   default, or your data's FP16/BF16/FP32) instead of raising an error as on NVIDIA.
-- ⁵ Refused with an error. FP8 on MI350 and RX 9000 (the AMD GPUs with a native FP8 matrix
-  instruction) is planned for v0.3.
+- ⁵ FP8 on AMD (v0.2) needs a native E4M3 matrix instruction: MI350 (gfx950) and RX 9000
+  (gfx120x). MI300 and RX 7000 would only emulate it through FP16 (saving memory, not time) and
+  refuse FP8 with an error. On an RX 9060 XT the FP8 tests pass, the encode gives exactly
+  PyTorch's codes for every FP32 value up to 448 in magnitude, and training ends within 0.1% of
+  BF16's loss. FP8 is 1.02× to 1.08× faster than BF16 at 1M vectors and 4,096 centroids, but
+  0.78× at 4M × 128 with 16,384 centroids: its tile settings are not tuned yet. MI350 is
+  compile-checked only.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.4× to 9× faster than with the NVIDIA-fitted settings,
@@ -462,7 +467,7 @@ are in the table under Kernels, above.
 |---|---|---|---|
 | Native FP32 (`quantizer=None`) | not supported | A100 or newer | CPU and any CUDA GPU |
 | FP16, BF16 | BF16 only | A100 or newer | A100 or newer |
-| FP8 (E4M3) | yes | H100, B200, B300 | not supported |
+| FP8 (E4M3) | yes | H100, B200, B300, AMD MI350/RX 9000 | not supported |
 | INT8, UINT8 | yes | A100, H100, B200, AMD MI300/MI350/RX 7000/RX 9000; dimension up to 43,919 | not supported |
 
 **How to convert data to lower precision.** You can either convert once yourself before training, which also saves memory, or keep the original precision in memory and pass a **converter** (`quantizer=`), which converts each chunk on the fly for faster distance computation:
@@ -581,7 +586,7 @@ python -m unittest discover -s tests -p 'torch_test_e_means*.py'
 The tests need two commands, because Python's default test discovery skips the PyTorch test files.
 
 On AMD GPUs, the same commands run the Triton tests on the four supported families; tests of
-FP8, CuTe and several GPUs are skipped. Add `EMEANS_ROCM_GRAPH_REPLAY=1`
+CuTe, several GPUs, and FP8 on MI300 and RX 7000 are skipped. Add `EMEANS_ROCM_GRAPH_REPLAY=1`
 to also run the CUDA-graph replay tests. Some tests need no GPU at all: they compile the Triton
 kernels for gfx942, gfx950, gfx1100 and gfx1200 and check the generated code
 (`torch_test_e_means_ptx_free.py`, `torch_test_e_means_amd_fences.py`,

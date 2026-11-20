@@ -166,6 +166,15 @@ def amd_triton_supported(device):
     return device_profile(device).known_amd and triton_available()
 
 
+def amd_fp8_supported(device):
+    """True on ROCm for a GPU with a native OCP E4M3 matrix instruction, with Triton.
+
+    gfx950 (MI350) and gfx120x (RX 9000). gfx942 and gfx11xx would need E4M3
+    emulated through FP16 (saving memory, not time) and are not enabled.
+    """
+    return amd_triton_supported(device) and device_profile(device).native_fp8
+
+
 def addmm_out_dtype_available():
     """Whether this PyTorch's addmm accepts out_dtype (native FP16/BF16 assignment)."""
     return "out_dtype" in (torch.addmm.__doc__ or "")
@@ -184,6 +193,7 @@ def amd_native_reduced_supported(device):
 
 
 AMD_TARGETS = "gfx942, gfx950, gfx11xx or gfx120x"
+AMD_FP8_TARGETS = "gfx950 or gfx120x"
 
 GRAPH_REPLAY_ENV = "EMEANS_ROCM_GRAPH_REPLAY"
 

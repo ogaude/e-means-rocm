@@ -93,11 +93,18 @@ class AmdSelectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "d <= 43919"):
                 select_backend(X, torch.int8, K, 43920)
 
-    def test_fp8_says_planned(self):
-        with amd("gfx1200"):
-            with self.assertRaisesRegex(RuntimeError,
-                                        "float8_e4m3fn assignment requires.*planned"):
-                select_backend(X, torch.float8_e4m3fn, K, D)
+    def test_fp8_selects_triton_on_native_e4m3_families(self):
+        for arch in ("gfx950", "gfx1200", "gfx1201"):
+            with self.subTest(arch=arch), amd(arch):
+                self.assertIs(select_backend(X, torch.float8_e4m3fn, K, D), TritonBackend)
+
+    def test_fp8_rejected_without_native_e4m3_or_triton(self):
+        for arch, triton in (("gfx942", True), ("gfx1100", True), ("gfx90a", True),
+                             ("gfx1200", False)):
+            with self.subTest(arch=arch, triton=triton), amd(arch, triton=triton):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "float8_e4m3fn assignment requires.*AMD gfx950 or gfx120x"):
+                    select_backend(X, torch.float8_e4m3fn, K, D)
 
     def test_explicit_requests_pass_through(self):
         with amd("gfx90a"):
@@ -111,6 +118,17 @@ class NvidiaSelectionUnchangedTest(unittest.TestCase):
     def test_sm90_bf16_selects_cute(self):
         with nvidia((9, 0)):
             self.assertIs(select_backend(X, torch.bfloat16, K, D), CuteBackend)
+
+    def test_fp8_unchanged(self):
+        for capability in ((9, 0), (10, 0), (10, 3)):
+            with self.subTest(capability=capability), nvidia(capability):
+                self.assertIn(select_backend(X, torch.float8_e4m3fn, K, D),
+                              (TritonBackend, CuteBackend))
+        with nvidia((8, 0)):
+            with self.assertRaises(RuntimeError) as caught:
+                select_backend(X, torch.float8_e4m3fn, K, D)
+        self.assertEqual(str(caught.exception),
+                         "float8_e4m3fn assignment requires an NVIDIA SM90, SM100, or SM103 GPU")
 
     def test_int8_unchanged(self):
         for capability in ((8, 0), (9, 0), (10, 0)):
