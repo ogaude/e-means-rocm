@@ -11,3 +11,4 @@ tools/rocm_probe/assign_kernels.py
 tools/rocm_probe/plain_*.s
 tools/rocm_probe/plain_*.ll
 w0_smoke_results.jsonl
+results/

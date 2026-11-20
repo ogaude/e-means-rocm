@@ -199,12 +199,17 @@ untested until v0.4.
 ## Repository layout
 
 ```
-contrib/e_means/     e-means source (upstream + ROCm changes); its README is the user guide
-benchs/e_means/      upstream benchmarks and demos
-tests/               e-means tests (upstream + new ROCm tests)
-tools/rocm_probe/    offline Triton compile probes for AMD targets
-tools/w0_smoke.py    precision x backend smoke matrix
-tools/tune_assign.py assignment-kernel tuning sweep and upstream-vs-table comparison
+contrib/e_means/      e-means source (upstream + ROCm changes); its README is the user guide
+benchs/e_means/       upstream benchmarks and demos
+tests/                e-means tests (upstream + new ROCm tests)
+tools/rocm_probe/     offline Triton compile probes for AMD targets
+tools/w0_smoke.py     precision x backend smoke matrix
+tools/tune_assign.py  assignment-kernel tuning sweep and upstream-vs-table comparison
+tools/tune_split_k.py direct vs split-K assignment on small row grids
+tools/bench_train.py  warm train() benchmark: Triton vs PyTorch, eager vs graph replay
+tools/gemm_gate.py    Triton BF16 assignment vs a bare BLAS GEMM (hand-written backend gate)
+tools/device_facts.py GPU and stack facts as JSON
+tools/gpu_session/    setup + one-shot session runner for a cloud GPU VM (see its README)
 ```
 
 ## Relation to upstream faiss
