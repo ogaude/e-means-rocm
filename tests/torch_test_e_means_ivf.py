@@ -29,6 +29,29 @@ def represented_oracle(queries, candidates):
     return scores.min(1)
 
 
+def assert_represented_scores(test, scores, ids, queries, candidates):
+    """Scores of the FP16-represented operands, up to FP32 summation order.
+
+    The index sums each dot product with CPU bmm on padded per-list batches, the
+    oracle with one mm. Whether those agree bit for bit depends on the BLAS build:
+    with OpenBLAS (for example the ROCm PyTorch wheels) a matmul's FP32 result
+    depends on the matrix shape. So ids must match exactly, and scores must lie
+    within the FP32 rounding bound of the represented operands. Unrepresented (FP32)
+    operands move the scores by orders of magnitude more than this bound.
+    """
+    expected_scores, expected_ids = represented_oracle(queries, candidates)
+    torch.testing.assert_close(ids.long(), expected_ids)
+    q, c = queries.half().double(), candidates.half().double()
+    envelope = (c.square().sum(1)[None] + 2 * (q.abs() @ c.abs().T)).gather(
+        1, expected_ids[:, None]).squeeze(1)
+    unit = torch.finfo(torch.float32).eps / 2
+    operations = c.shape[1] + 2  # dot, then norm - 2 * dot
+    gamma = operations * unit / (1 - operations * unit)
+    error = (scores.double() - expected_scores.double()).abs()
+    test.assertTrue((error <= gamma * envelope).all(),
+                    f'represented-score bound violated: {error}')
+
+
 def source_score_bound(test, scores, queries, candidates):
     # Independent FP64 operands; bound norm, dot and epilogue FP32 rounding.
     q, c = queries.double(), candidates.double()
@@ -58,9 +81,7 @@ class TestIVFFlat(unittest.TestCase):
         index.add(candidates)
         self.assertEqual(int((index.list_sizes == 0).sum()), 3)
         scores, ids = index.search_1nn(queries)
-        expected_scores, expected_ids = represented_oracle(queries, candidates)
-        torch.testing.assert_close(scores, expected_scores, rtol=0, atol=0)
-        torch.testing.assert_close(ids.long(), expected_ids)
+        assert_represented_scores(self, scores, ids, queries, candidates)
         self.assertEqual(ids[0].item(), 0)
         self.assertEqual(ids[1].item(), 0)
 
