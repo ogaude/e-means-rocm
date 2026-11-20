@@ -426,11 +426,13 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - ⁵ Refused with an error. FP8 on MI350 and RX 9000 (the AMD GPUs with a native FP8 matrix
   instruction) is planned for v0.3.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
-  9060 XT it trains, the INT8 tests pass, and distances are exact; it is about 16% slower than
-  BF16 there (1M × 128 vectors, 4,096 centroids), as its tile settings are not tuned yet. The
-  pipeline depth is set per family so the kernel fits in 64 KiB of shared memory (upstream's
-  setting needs up to 112 KiB outside MI300). MI300 is checked in the v0.2 cloud session; MI350
-  and RX 7000 are compile-checked only.
+  9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
+  RX 9000, the INT8 assignment kernel is 2.4× to 9× faster than with the NVIDIA-fitted settings,
+  and INT8 training is 1.07× to 1.37× faster than BF16 (1M × 64 to 4M × 128 vectors, 4,096 to
+  16,384 centroids, final loss within 0.06% of BF16). Elsewhere the pipeline depth is set per
+  family so the kernel fits in 64 KiB of shared memory (upstream's setting needs up to 112 KiB
+  outside MI300). MI300 is checked in the v0.2 cloud session; MI350 and RX 7000 are
+  compile-checked only.
 - On the CPU, computation remains FP32 (see On the CPU).
 
 **More on AMD GPUs.**

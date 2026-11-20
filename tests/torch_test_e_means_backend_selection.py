@@ -239,5 +239,43 @@ class GraphReplayPolicyTest(unittest.TestCase):
             self.assertFalse(model._replay_eligible(x))
 
 
+class SplitKSelectionTest(unittest.TestCase):
+    """Split-K choice: NVIDIA keeps _use_split_k; rdna4 caps it at 8 row blocks."""
+
+    DEVICE = torch.device("cuda", 0)
+
+    def setUp(self):
+        try:
+            from faiss.contrib.e_means import triton_assignment as ta
+        except Exception as exc:  # pragma: no cover - environment without triton
+            self.skipTest("triton not importable: %s" % exc)
+        self.ta = ta
+
+    def test_nvidia_matches_use_split_k(self):
+        ta = self.ta
+        with nvidia((9, 0)):
+            for b in (256, 1024, 4096, 16384):
+                for d in (64, 128, 768):
+                    with self.subTest(b=b, d=d):
+                        self.assertEqual(ta._select_split_k(self.DEVICE, b, 16384, d, True),
+                                         ta._use_split_k(b, 16384, d, True))
+
+    def test_rdna4_caps_row_blocks(self):
+        ta = self.ta
+        with amd("gfx1200"):
+            self.assertTrue(ta._select_split_k(self.DEVICE, 256, 16384, 128, True))
+            self.assertTrue(ta._select_split_k(self.DEVICE, 512, 16384, 128, True))
+            for b in (1024, 4096):
+                with self.subTest(b=b):
+                    self.assertTrue(ta._use_split_k(b, 16384, 128, True))
+                    self.assertFalse(ta._select_split_k(self.DEVICE, b, 16384, 128, True))
+
+    def test_other_families_keep_use_split_k(self):
+        ta = self.ta
+        for arch in ("gfx942", "gfx950", "gfx1100"):
+            with self.subTest(arch=arch), amd(arch):
+                self.assertTrue(ta._select_split_k(self.DEVICE, 4096, 16384, 128, True))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -120,12 +120,26 @@ _AMD_INT8_STAGES = {
 }
 
 
-def _int8_launch_config(physical_d, family=None):
-    """INT8 assignment (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
+# Tuned INT8 configurations per AMD family, same rule format as _AMD_DIRECT_CONFIGS
+# with (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages); BLOCK_D None on the
+# FULL_D path means physical_d rounded up to a power of two. Families without an entry
+# use _int8_default_config.
+# rdna4 (gfx120x): chosen with `tools/tune_assign.py --dtypes int8` on an RX 9060 XT
+# (gfx1200, ROCm 10.1, Triton 3.8; 65,536 rows, d = 32 to 768, k = 1,024 to 16,384:
+# 21 shapes, every candidate with distances and labels identical to the default).
+# Comments give the speed-up over _int8_default_config. One stage won on every shape.
+_AMD_INT8_CONFIGS = {
+    "rdna4": (
+        (64, (True, 128, 128, None, 4, 1)),     # no padding of D to 128: 5.2-8.5x
+        (128, (True, 128, 64, 128, 4, 1)),      # 2.5-3.4x
+        (256, (True, 128, 64, 256, 8, 1)),      # 4.8-6.0x
+        (None, (False, 64, 256, 128, 8, 1)),    # 2.8-2.9x
+    ),
+}
 
-    ``family`` is the AMD architecture family, or None on NVIDIA (upstream: 3 stages).
-    Pure, so offline compile tests can check every family's configuration.
-    """
+
+def _int8_default_config(physical_d, family=None):
+    """Upstream INT8 launch configuration; on AMD with the family's stage count."""
     full_d = physical_d <= 256
     # Wider operands retain the original launch configuration.
     block_b, block_k, num_warps = (128, 128, 4) if full_d else (_INT8_BLOCK_B, _INT8_BLOCK_K, 8)
@@ -136,6 +150,21 @@ def _int8_launch_config(physical_d, family=None):
         stages = _AMD_INT8_STAGES[family]
         num_stages = stages[2] if not full_d else stages[0] if block_d <= 128 else stages[1]
     return full_d, block_b, block_k, block_d, num_warps, num_stages
+
+
+def _int8_launch_config(physical_d, family=None):
+    """INT8 assignment (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
+
+    ``family`` is the AMD architecture family, or None on NVIDIA (upstream settings).
+    Pure, so offline compile tests can check every family's configuration.
+    """
+    for max_d, config in _AMD_INT8_CONFIGS.get(family, ()):
+        if max_d is None or physical_d <= max_d:
+            full_d, block_b, block_k, block_d, num_warps, num_stages = config
+            if full_d and block_d is None:
+                block_d = max(16, triton.next_power_of_2(physical_d))
+            return full_d, block_b, block_k, block_d, num_warps, num_stages
+    return _int8_default_config(physical_d, family)
 
 
 _MAX_K = 2**31 - max(
@@ -816,6 +845,27 @@ def _use_split_k(b, k, d, is_reduced, direct_block_d=_DIRECT_REDUCED_BLOCK_D):
     return rows * split_span < (_SPLIT_K_TARGET_PROGRAMS // 4) * direct_span
 
 
+# AMD families whose direct kernel beats split-K beyond a few row blocks: split-K only
+# when cdiv(b, _SPLIT_K_BLOCK_B) is at most this many, on top of _use_split_k.
+# rdna4: `tools/tune_split_k.py` on an RX 9060 XT (BF16 and FP16, d = 64 to 768,
+# k = 4,096 to 65,536): split-K is 1.2-3.9x faster at 256 rows (4 blocks), but at
+# 1,024 rows 0.5-0.75x (except 1.03-1.16x at d = 128) and at 4,096 rows 0.27-0.42x,
+# where _use_split_k still chose it. Families without an entry keep _use_split_k.
+_AMD_SPLIT_K_MAX_ROW_BLOCKS = {"rdna4": 8}
+
+
+def _select_split_k(device, b, k, d, is_reduced, direct_block_d=_DIRECT_REDUCED_BLOCK_D):
+    """Whether _launch_assignment uses split-K: _use_split_k plus the AMD cap."""
+    if not _use_split_k(b, k, d, is_reduced, direct_block_d):
+        return False
+    if torch.version.hip is None:
+        return True
+    from .device_profile import device_profile
+
+    limit = _AMD_SPLIT_K_MAX_ROW_BLOCKS.get(device_profile(device).family)
+    return limit is None or triton.cdiv(b, _SPLIT_K_BLOCK_B) <= limit
+
+
 def _split_k_partitions(b, k):
     """Bound parallelism and ensure each partition has several K tiles.
 
@@ -864,7 +914,7 @@ def _launch_assignment(
     if (is_fp8 and triton.cdiv(d, 128) * 128
             == triton.cdiv(d, _DIRECT_REDUCED_BLOCK_D) * _DIRECT_REDUCED_BLOCK_D):
         direct_block_d = 128
-    split_k = _use_split_k(b, k, d, is_reduced, direct_block_d)
+    split_k = _select_split_k(x.device, b, k, d, is_reduced, direct_block_d)
     if not split_k:
         full_d = (
             is_reduced

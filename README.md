@@ -6,7 +6,7 @@ fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 > **Status: v0.1 released (tag `e-means-rocm-v0.1`) for RX 9000 (gfx1200). MI300X follows in v0.2.**
 > On an RX 9060 XT (ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
-> FP32/FP16/BF16 path trains, the e-means test suite passes (one known upstream failure, below),
+> FP32/FP16/BF16 path trains, the e-means test suite passes,
 > the rewritten kernels match PyTorch bit for bit, and Triton is 2.1× to 4.8× faster than PyTorch
 > for BF16 and FP16. gfx942 (MI300X) has not been run yet; gfx950 and gfx11xx are compile-checked
 > only. **NVIDIA has not been re-run on hardware:** "NVIDIA unchanged" rests on mocked-device
@@ -133,8 +133,12 @@ python -m pytest -q $(ls *e_means*.py | grep -v -e utils -e conditions)
   `torch_test_e_means_device_profile.py` (mocked devices).
 - On the GPU, `torch_test_e_means_triton_numerics.py` checks the rewritten kernels bit for bit
   against PyTorch and correctly rounded references.
-- Known failure: `torch_test_e_means_ivf.py::TestIVFFlat::test_all_probes_split_tiles_empty_lists_and_ties`
-  fails by one rounding step on this torch build, also on the unmodified upstream snapshot.
+- `torch_test_e_means_ivf.py::TestIVFFlat::test_all_probes_split_tiles_empty_lists_and_ties`
+  used to fail by one rounding step on this torch build (also on the unmodified upstream
+  snapshot): the ROCm wheels use OpenBLAS, whose FP32 CPU matmul results depend on the matrix
+  shape, so the index's batched products and the test's single product could differ in the last
+  bit. The test now requires identical ids and scores within FP32 rounding of the represented
+  operands, which still catches unrepresented (FP32) operands by a factor of about 100.
 
 GPU smoke matrix (every precision × backend, each case in its own process with a timeout):
 
@@ -195,7 +199,10 @@ Acceptance for v0.1, on gfx1200:
 
 | Item | Status |
 |---|---|
-| INT8/UINT8 on the four AMD families | done on gfx1200: tests pass eager and with replay, distances exact against a float64 reference on all three launch paths; about 16% slower than BF16 (1M × 128, k = 4,096), not tuned; gfx942 to run in the cloud session |
+| INT8/UINT8 on the four AMD families | done on gfx1200: tests pass eager and with replay, distances exact against a float64 reference; gfx942 to run in the cloud session |
+| RDNA4 INT8 tuning table | done: INT8 assignment kernel 2.4× to 9× faster than the NVIDIA-fitted settings; INT8 training now 1.07× to 1.37× faster than BF16 on gfx1200 (it was 1.16× slower) |
+| RDNA4 split-K cap | done: split-K only up to 512 rows on gfx120x; the NVIDIA-fitted rule chose it up to 4,096 to 8,192 rows, where it is 2.4× to 3.9× slower on gfx1200 |
+| IVF test on OpenBLAS builds | fixed (test tolerance; see Running the tests) |
 | MI300X validation and tuning | scripts ready (`tools/gpu_session/`); cloud session not run yet |
 | Hand-written backend gate | measurement script ready (`tools/gemm_gate.py`); runs in the same session |
 

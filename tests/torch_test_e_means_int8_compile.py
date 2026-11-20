@@ -5,8 +5,9 @@
 # What this guards:
 #   * every INT8 launch configuration stays inside the family's LDS budget
 #     (upstream's num_stages=3 does not, outside gfx942);
-#   * each stage count in _AMD_INT8_STAGES is the largest (up to 3) that fits, so the
-#     table is neither stale nor needlessly conservative for this Triton;
+#   * each stage count in _AMD_INT8_STAGES (the fallback for families without a tuned
+#     entry) is the largest (up to 3) that fits, so the table is neither stale nor
+#     needlessly conservative for this Triton;
 #   * the kernel uses the family's integer matrix instruction (MFMA i8 / WMMA iu8);
 #   * NVIDIA keeps the upstream launch configuration.
 
@@ -25,19 +26,21 @@ except Exception:  # pragma: no cover - environment without triton
 
 # One representative architecture per family.
 ARCHS = {"cdna3": "gfx942", "cdna4": "gfx950", "rdna3": "gfx1100", "rdna4": "gfx1200"}
-# physical_d values covering the three launch paths: FULL_D with BLOCK_D 128 and 256,
-# and the tiled path.
-PATHS = {"full128": 128, "full256": 256, "tiled": 512}
+# physical_d values covering the launch paths: FULL_D with BLOCK_D 128 and 256, the
+# tiled path, and the widths tuned tables single out.
+PATHS = {"full128": 128, "full256": 256, "tiled": 512, "d16": 16, "d32": 32,
+         "d48": 48, "d64": 64, "d192": 192, "d768": 768}
 MATRIX = re.compile(r"^\s+(v_mfma_i32_\w+_i8|v_wmma_i32_\w+_iu8)", re.M)
 SIGNATURE = dict(x_ptr="*i8", centroid_ptr="*i8", centroid_norm_ptr="*i32",
                  distance_ptr="*fp32", label_ptr="*i64", B="i32", K="i32", D="i32",
                  stride_xb="i64", stride_xd="i64", stride_ck="i64", stride_cd="i64")
 
 
-def _compile(arch, physical_d, num_stages=None, unsigned=False, packed=True):
+def _compile(arch, physical_d, num_stages=None, unsigned=False, packed=True,
+             config=None):
     family = profile_for_arch(arch).family
-    full_d, block_b, block_k, block_d, num_warps, stages = ta._int8_launch_config(
-        physical_d, family)
+    full_d, block_b, block_k, block_d, num_warps, stages = (
+        config or ta._int8_launch_config)(physical_d, family)
     constexprs = dict(UNSIGNED=unsigned, BLOCK_B=block_b, BLOCK_K=block_k, BLOCK_D=block_d,
                       WIDE_CENTROID=False, FULL_D=full_d, PACKED=packed,
                       x_desc=None, centroid_desc=None)
@@ -74,18 +77,22 @@ class Int8LaunchConfigTest(unittest.TestCase):
         for family, arch in ARCHS.items():
             budget = profile_for_arch(arch).lds_bytes
             for path, physical_d in PATHS.items():
-                stages = ta._int8_launch_config(physical_d, family)[5]
+                default = ta._int8_default_config
+                stages = default(physical_d, family)[5]
                 if stages == 3:
                     continue
                 with self.subTest(arch=arch, path=path, stages=stages):
-                    more = _compile(arch, physical_d, num_stages=stages + 1)
+                    fits = _compile(arch, physical_d, config=default)
+                    self.assertLessEqual(fits.metadata.shared, budget)
+                    more = _compile(arch, physical_d, num_stages=stages + 1, config=default)
                     self.assertGreater(more.metadata.shared, budget)
 
     def test_upstream_hard_coded_stages_overflow_outside_cdna3(self):
         # The reason for the table: three stages on the tiled path.
         for family, arch in ARCHS.items():
             with self.subTest(arch=arch):
-                shared = _compile(arch, PATHS["tiled"], num_stages=3).metadata.shared
+                shared = _compile(arch, PATHS["tiled"], num_stages=3,
+                                  config=ta._int8_default_config).metadata.shared
                 budget = profile_for_arch(arch).lds_bytes
                 if family == "cdna3":
                     self.assertLessEqual(shared, budget)
@@ -95,12 +102,14 @@ class Int8LaunchConfigTest(unittest.TestCase):
     def test_nvidia_keeps_upstream_configuration(self):
         self.assertEqual(ta._int8_launch_config(128), (True, 128, 128, 128, 4, 3))
         self.assertEqual(ta._int8_launch_config(256), (True, 128, 128, 256, 4, 3))
+        self.assertEqual(ta._int8_launch_config(64), (True, 128, 128, 128, 4, 3))
         self.assertEqual(ta._int8_launch_config(512), (False, ta._INT8_BLOCK_B,
                                                        ta._INT8_BLOCK_K, ta._INT8_BLOCK_D,
                                                        8, 3))
 
     def test_every_family_has_an_entry(self):
         self.assertEqual(set(ta._AMD_INT8_STAGES), set(ARCHS))
+        self.assertLessEqual(set(ta._AMD_INT8_CONFIGS), set(ARCHS))
 
 
 if __name__ == "__main__":

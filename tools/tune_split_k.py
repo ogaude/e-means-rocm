@@ -5,8 +5,9 @@
 
 Split-K splits the centroid range over several programs per row block and adds a
 reduction launch. _launch_assignment uses it for reduced precision when the row grid
-is small (_use_split_k), with a partition count from _split_k_partitions. Both rest on
-occupancy constants fitted on NVIDIA (_SPLIT_K_TARGET_PROGRAMS = 512).
+is small (_select_split_k: _use_split_k plus a per-family row-block cap on AMD), with
+a partition count from _split_k_partitions. Both rest on occupancy constants fitted on
+NVIDIA (_SPLIT_K_TARGET_PROGRAMS = 512).
 
 For each shape this times _launch_assignment three ways: forced direct kernel, split-K
 at each power-of-two partition count, and the current heuristic. Labels are checked
@@ -40,7 +41,8 @@ def main():
         "dt", "rows", "d", "k", "direct ms", "best split-K (P, ms, x)", "heuristic (P, ms)",
         "verdict"))
 
-    orig_use, orig_parts = ta._use_split_k, ta._split_k_partitions
+    orig_use, orig_parts = ta._select_split_k, ta._split_k_partitions
+    device = torch.device("cuda")
     torch.manual_seed(0)
     try:
         for name in a.dtypes:
@@ -56,11 +58,11 @@ def main():
                         run = lambda: ta._launch_assignment(x, c, norm, dist, labels, False)
 
                         # Current heuristic first (module functions untouched).
-                        heur_split = orig_use(b, k, d, True)
+                        heur_split = orig_use(device, b, k, d, True)
                         heur_p = orig_parts(b, k) if heur_split else 1
                         t_heur = triton.testing.do_bench(run)
 
-                        ta._use_split_k = lambda *args, **kw: False
+                        ta._select_split_k = lambda *args, **kw: False
                         run()
                         torch.cuda.synchronize()
                         ref_labels, ref_dist = labels.clone(), dist.clone()
@@ -70,7 +72,7 @@ def main():
                         max_p = max(1, min(triton.cdiv(k, ta._SPLIT_K_BLOCK_K),
                                            ta._SPLIT_K_MAX_PARTITIONS))
                         p = 2
-                        ta._use_split_k = lambda *args, **kw: True
+                        ta._select_split_k = lambda *args, **kw: True
                         while p <= max_p:
                             ta._split_k_partitions = lambda *args, p=p: p
                             try:
@@ -87,7 +89,7 @@ def main():
                             except Exception as exc:
                                 print("   P=%d failed: %s" % (p, str(exc)[:120]))
                             p *= 2
-                        ta._use_split_k, ta._split_k_partitions = orig_use, orig_parts
+                        ta._select_split_k, ta._split_k_partitions = orig_use, orig_parts
 
                         if best and best[1] < 0.95 * t_direct:
                             verdict = "split-K P=%d" % best[0]
@@ -103,7 +105,7 @@ def main():
                             verdict, "" if heur_ok else "   <- heuristic disagrees"),
                             flush=True)
     finally:
-        ta._use_split_k, ta._split_k_partitions = orig_use, orig_parts
+        ta._select_split_k, ta._split_k_partitions = orig_use, orig_parts
 
 
 if __name__ == "__main__":

@@ -59,8 +59,9 @@ Steps run in this order, cheap and decision-critical first. Select steps with
 | `gate` | `gemm_gate.jsonl` and a verdict | C gate: build the FlyDSL backend or not |
 | `bench` | `bench_train.jsonl` and a summary table | Triton vs native on gfx942; graph-replay default for cdna3 |
 | `tests`, `tests-replay` | pytest logs and JUnit XML | acceptance |
-| `split-k` | direct vs split-K per shape | refit of `_SPLIT_K_TARGET_PROGRAMS` for 304 CUs |
-| `tune-compare` | upstream vs table | baseline before a cdna3 entry exists |
+| `split-k` | direct vs split-K per shape | `_AMD_SPLIT_K_MAX_ROW_BLOCKS` entry (or a target refit) for 304 CUs |
+| `tune-compare` | upstream vs table, float and INT8 | baseline before a cdna3 entry exists |
+| `tune-int8` | best INT8 configurations per shape | the `cdna3` entry in `_AMD_INT8_CONFIGS` |
 | `tune-sweep` | best configurations per shape | the `cdna3` entry in `_AMD_DIRECT_CONFIGS` |
 
 `tune-sweep` is the long one: about two hours on gfx1200 with the default grid

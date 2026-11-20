@@ -21,6 +21,7 @@
 #   tests-replay  same with EMEANS_ROCM_GRAPH_REPLAY=1
 #   split-k       tools/tune_split_k.py: direct vs split-K on small row grids
 #   tune-compare  tools/tune_assign.py --compare (upstream constants vs this GPU's table)
+#   tune-int8     tools/tune_assign.py --dtypes int8 sweep (INT8 kernel)
 #   tune-sweep    tools/tune_assign.py sweep (longest step; hours)
 #
 # Each step logs to $OUT/<step>.log; a failing step is recorded and the next one runs.
@@ -29,6 +30,7 @@
 #   STEPS         space-separated step list (default: all, in the order above)
 #   PYTHON        interpreter (default: python on PATH, i.e. the activated venv)
 #   QUICK=1       small shapes everywhere (minutes; checks the script, not the GPU)
+#   INT8_ARGS     arguments for the INT8 sweep
 #   SWEEP_ARGS    extra arguments for the sweep (default: --quick --k 1024 16384, the
 #                 grid behind the rdna4 table)
 set -uo pipefail
@@ -36,8 +38,8 @@ set -uo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$REPO"
 PY=${PYTHON:-python}
-python() { "$PY" "$@"; }
-ALL="facts probe smoke smoke-replay gate bench tests tests-replay split-k tune-compare tune-sweep"
+python() { command "$PY" "$@"; }  # command: never recurse into this function
+ALL="facts probe smoke smoke-replay gate bench tests tests-replay split-k tune-compare tune-int8 tune-sweep"
 STEPS=${STEPS:-$ALL}
 QUICK=${QUICK:-0}
 ARCH=$(python -c 'import torch; p=torch.cuda.get_device_properties(0); print(getattr(p,"gcnArchName","nvidia").split(":")[0])' 2>/dev/null || echo unknown)
@@ -45,6 +47,7 @@ OUT=${OUT:-$REPO/results/$(hostname -s)-$ARCH-$(date -u +%Y%m%dT%H%MZ)}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 SWEEP_ARGS=${SWEEP_ARGS:---quick --k 1024 16384}
+INT8_ARGS=${INT8_ARGS:---quick --d 32 64 128 192 256 512 768 --k 1024 4096 16384 --top 6}
 
 if [ "$QUICK" = 1 ]; then
   SMOKE_ARGS="--rows 20000 --k 256"
@@ -53,6 +56,7 @@ if [ "$QUICK" = 1 ]; then
   SPLITK_ARGS="--rows 256 4096 --d 128 --k 4096"
   COMPARE_ARGS="--rows 8192 --d 64 256 --k 1024"
   SWEEP_ARGS="--quick --rows 8192 --dtypes bf16 --d 64 --k 1024 --top 3"
+  INT8_ARGS="--quick --rows 8192 --d 64 --k 1024 --top 3"
   TEST_FILES="torch_test_e_means_device_profile.py torch_test_e_means_triton_numerics.py"
 else
   SMOKE_ARGS=""
@@ -129,6 +133,11 @@ step_split_k() {
 
 step_tune_compare() {
   python tools/tune_assign.py --compare $COMPARE_ARGS
+  python tools/tune_assign.py --compare --dtypes int8 $COMPARE_ARGS
+}
+
+step_tune_int8() {
+  python tools/tune_assign.py --dtypes int8 $INT8_ARGS
 }
 
 step_tune_sweep() {
@@ -154,6 +163,7 @@ for s in $STEPS; do
     tests-replay) EMEANS_ROCM_GRAPH_REPLAY=1 run_step tests-replay step_tests tests-replay ;;
     split-k)      run_step split-k step_split_k ;;
     tune-compare) run_step tune-compare step_tune_compare ;;
+    tune-int8)    run_step tune-int8 step_tune_int8 ;;
     tune-sweep)   run_step tune-sweep step_tune_sweep ;;
     *) echo "unknown step: $s (known: $ALL)" >&2 ;;
   esac
