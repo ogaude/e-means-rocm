@@ -411,10 +411,10 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
 - ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
-  BF16 there: 3.1× on an RX 9060 XT (1M × 128 vectors, 4,096 centroids). Keep the default BF16
+  BF16 there: 1.4× to 5.8× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
   conversion on these cards. Triton is still faster than PyTorch for native FP32 (1.6×
   measured), so it stays the automatic choice.
-- ⁴ AMD support in this fork (v0.1, INT8 in v0.2) is validated on RX 9000. On an RX 9060 XT (gfx1200, ROCm
+- ⁴ AMD support in this fork (v0.1; INT8 and FP8 in v0.2) is validated on RX 9000. On an RX 9060 XT (gfx1200, ROCm
   10.1) every precision above trains, the e-means tests pass, and Triton is 2.1× to 4.8× faster
   than PyTorch for BF16 and FP16. RX 9000 GPUs use tile settings tuned for them, which make the
   assignment kernel up to 2.7× faster and training 1.25× to 1.35× faster than the NVIDIA-fitted

@@ -4,25 +4,26 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.1 released (tag `e-means-rocm-v0.1`) for RX 9000 (gfx1200); v0.2 in progress
-> on `main`: INT8 and FP8 are done on RX 9000, MI300X is waiting for a cloud session.**
-> On an RX 9060 XT (ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
-> FP32/FP16/BF16, INT8/UINT8 and FP8 path trains, the whole e-means test suite passes,
-> the rewritten kernels match PyTorch bit for bit, and Triton is 2.1× to 4.8× faster than PyTorch
-> for BF16 and FP16. Tuned INT8 trains 1.07× to 1.37× faster than BF16 there. gfx942 (MI300X)
-> has not been run yet; gfx950 and gfx11xx are compile-checked only. **NVIDIA has not been
+> **Status: v0.1 released (tag `e-means-rocm-v0.1`); v0.2 done on RX 9000, MI300X pending.**
+> On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
+> data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
+> and the rewritten kernels match PyTorch bit for bit. Triton is 2.1× to 9.3× faster than
+> PyTorch for BF16, and tuned FP8 and INT8 train 1.0× to 1.4× faster than BF16. gfx942 (MI300X)
+> waits for a cloud session; gfx950 and gfx11xx are compile-checked only. **NVIDIA has not been
 > re-run on hardware:** "NVIDIA unchanged" rests on mocked-device tests and sm90 compiles (see
 > v0.1 acceptance).
 
 ## Target GPUs
 
-| Family | Architecture | Example GPUs | Plan |
-|---|---|---|---|
-| CDNA 3 | gfx942 | MI300X, MI325X | compile-checked; validation and tuning in v0.2 |
-| CDNA 4 | gfx950 | MI350 series | compile-checked |
-| RDNA 3 | gfx11xx | RX 7000 series | compile-checked |
-| RDNA 4 | gfx120x | RX 9000 series | **runs and tuned**, tested on RX 9060 XT (FP32/FP16/BF16 in v0.1, INT8 and FP8 in v0.2) |
+| Family | Architecture | Example GPUs | FP32 / FP16 / BF16 | INT8 | FP8 (E4M3) |
+|---|---|---|---|---|---|
+| CDNA 3 | gfx942 | MI300X, MI325X | compile-checked; run and tuning in v0.2 (cloud) | compile-checked | refused (no native E4M3) |
+| CDNA 4 | gfx950 | MI350 series | compile-checked | compile-checked | compile-checked |
+| RDNA 3 | gfx11xx | RX 7000 series | compile-checked | compile-checked | refused (no native E4M3) |
+| RDNA 4 | gfx120x | RX 9000 series | **runs, tuned** (v0.1) | **runs, tuned** (v0.2) | **runs, tuned** (v0.2) |
 
+"Compile-checked" means the kernels compile for that target within its shared-memory budget and
+are selected automatically, with the NVIDIA-fitted tile settings; they have not been run.
 Sibling chips (gfx1101, gfx1201, ...) are matched by family. Other AMD GPUs fall back to native
 FP32 through PyTorch, which upstream already supports.
 
@@ -40,39 +41,52 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
 | INT8 (v0.2) | INT8/UINT8 assignment runs on the four families' integer matrix instructions. Untuned families get a per-family pipeline depth that fits in 64 KiB of LDS (upstream's three stages need up to 112 KiB outside gfx942). |
 | FP8 (v0.2) | FP8 (E4M3) assignment runs on the families with a native E4M3 matrix instruction, gfx950 and gfx120x. The scaled split's NVIDIA-only `libdevice.ldexp` is replaced on AMD by an exact power-of-two multiply (bit-identical to `torch.ldexp`). gfx942 and gfx11xx refuse FP8 with an error. |
-| Tests | Vendor-aware skips replace the blanket ROCm skips; new GPU-free compile tests (including INT8 LDS fit for all four families) and bit-level Triton-vs-PyTorch checks. One upstream IVF test made robust to OpenBLAS builds. |
+| Tests | Vendor-aware skips replace the blanket ROCm skips; INT8 and FP8 tests run on AMD; new GPU-free compile tests (including INT8 LDS fit for all four families) and bit-level Triton-vs-PyTorch checks, FP8 encode included. One upstream IVF test made robust to OpenBLAS builds. |
 
 Supported data per GPU is in the kernel table of the
 [e-means README](contrib/e_means/README.md#kernels).
 
-## Findings on RX 9000 (gfx1200)
+## Results on RX 9000 (gfx1200)
 
-Measured on an RX 9060 XT, ROCm 10.1, torch 2.14.0+rocm10.1.0, triton 3.8.0. Training times are
-warm `train()` runs of 3 epochs with the tuned settings.
+Measured on an RX 9060 XT (16 GB), ROCm 10.1, torch 2.14.0+rocm10.1.0, triton 3.8.0, all in one
+run (2026-11-20). Times are warm `train()` runs of 3 epochs on random FP32 data, converted to
+each format by the default path or a calibrated quantizer; "PyTorch" is
+`assignment_backend="native"`.
 
-| Data (1M × 128 vectors, 4,096 centroids) | Triton | PyTorch | Triton speed-up |
+| Data format | 200k × 64, 1,024 centroids | 1M × 128, 4,096 centroids | 4M × 128, 16,384 centroids |
 |---|---|---|---|
-| BF16 (the default for FP32 input) | 0.207 s | 0.993 s | 4.8× |
-| FP16 | 0.201 s | 0.968 s | 4.8× |
-| Native FP32 (`quantizer=None`) | 0.638 s | 1.020 s | 1.6× |
+| BF16, Triton (the default for FP32 input) | 0.028 s | 0.232 s | 1.491 s |
+| BF16, PyTorch | 0.058 s | 1.008 s | 13.864 s |
+| FP16, Triton | 0.029 s | 0.227 s | 1.503 s |
+| FP16, PyTorch | 0.058 s | 0.980 s | 13.410 s |
+| Native FP32, Triton | 0.039 s | 0.638 s | 8.601 s |
+| Native FP32, PyTorch | 0.063 s | 1.015 s | 14.132 s |
+| INT8, Triton | 0.028 s | 0.193 s | 1.090 s |
+| FP8, Triton | **0.025 s** | **0.169 s** | 1.143 s |
 
-At 200k × 64 vectors and 1,024 centroids the speed-ups are 2.1× (BF16, FP16) and 1.6× (FP32).
+| Speed-up | 200k × 64 | 1M × 128 | 4M × 128 |
+|---|---|---|---|
+| Triton over PyTorch, BF16 | 2.1× | 4.3× | 9.3× |
+| Triton over PyTorch, FP32 | 1.6× | 1.6× | 1.6× |
+| INT8 over BF16 (Triton) | 1.02× | 1.20× | 1.37× |
+| FP8 over BF16 (Triton) | 1.13× | 1.37× | 1.30× |
 
-INT8 and FP8 (v0.2, tuned settings) against the default BF16, same benchmark:
+Final losses: FP16 and FP32 within 0.02% of BF16, INT8 within 0.06%, FP8 within 0.08%.
 
-| Data | BF16 | INT8 | FP8 | INT8 speed-up | FP8 speed-up |
-|---|---|---|---|---|---|
-| 1M × 64, 4,096 centroids | 0.121 s | 0.104 s | 0.103 s | 1.16× | 1.18× |
-| 1M × 128, 4,096 centroids | 0.232 s | 0.196 s | 0.171 s | 1.19× | 1.36× |
-| 1M × 768, 4,096 centroids | 1.179 s | 1.099 s | 0.880 s | 1.07× | 1.34× |
-| 4M × 128, 16,384 centroids | 1.494 s | 1.088 s | 1.143 s | 1.37× | 1.31× |
+What the RDNA4 tuning gained (assignment kernel, against the NVIDIA-fitted settings, identical
+results; `tools/tune_assign.py --compare`):
 
-Final losses agree with BF16 to within 0.08% for both. Before tuning, FP8 was 0.79× to 1.08× of
-BF16 and INT8 0.86×. (The BF16 time at 1M × 128 differs from the table above, 0.232 s vs
-0.207 s: separate runs on a desktop card.)
+| Format | Kernel speed-up | Effect on training |
+|---|---|---|
+| FP32 / FP16 / BF16 | 1.0× to 2.7× (v0.1); d ≤ 64 re-chosen in v0.2 to hold from 2,048 to 262,144 rows | 1.25× to 1.35× faster (v0.1 measurement) |
+| INT8 | 2.4× to 10× | from 0.86× of BF16 to 1.02× to 1.37× |
+| FP8 | 1.0× to 2.9× | from 0.79× to 1.08× of BF16 to 1.13× to 1.37× |
+| Split-K choice | 1.3× to 3.9× on calls of 1,024 to 8,192 rows | none (large batches never use it) |
 
-- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 3.1× the
-  time of BF16 here. Triton is still the faster FP32 path, so it stays the automatic choice.
+Findings:
+
+- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 1.4× to
+  5.8× the time of BF16 here, more as the problem grows. Triton is still the faster FP32 path, so it stays the automatic choice.
 - **Results are not bit-reproducible by default**, on AMD as upstream on NVIDIA: batch statistics
   are summed with atomic additions, so two identical FP32 runs can end in different clusterings
   (in a BF16 test the labels agreed but centroid bits still differed slightly). `torch.use_deterministic_algorithms(True)` makes runs identical,
@@ -82,9 +96,10 @@ BF16 and INT8 0.86×. (The BF16 time at 1M × 128 differs from the table above, 
 - **The NVIDIA-fitted tile settings are slow on RDNA4** (wave32): up to 2.7× in the assignment
   kernel, mostly from wide row tiles at d > 128 and the stage count at d ≤ 128. A sweep and
   comparison tool, `tools/tune_assign.py`, made the RDNA4 table.
-- **INT8 needs its own settings even more.** With the NVIDIA-fitted ones INT8 was 1.16× slower
-  than BF16 here; tuned, it is 1.07× to 1.37× faster. The largest gain (5× to 8.5× in the kernel)
-  is at d ≤ 64, where upstream pads every row to 128. One pipeline stage won on every shape.
+- **INT8 and FP8 need their own settings even more.** With the NVIDIA-fitted ones INT8 was 1.16×
+  slower than BF16 here and FP8 up to 1.27× slower; tuned, both are faster than BF16. For INT8 the
+  largest kernel gain (5× to 10×) is at d ≤ 64, where upstream pads every row to 128. One pipeline
+  stage won on nearly every INT8 and FP8 shape.
 - **Tile settings tuned at one batch size can lose at another.** The v0.1 BF16 settings for
   d ≤ 64, tuned at 65,536 rows, fell to 0.6× of upstream's speed at 2,048 to 32,768 rows with
   1,024 centroids (128-row tiles leave half the card's work-groups idle on small batches). One
@@ -158,10 +173,12 @@ python -m pytest -q $(ls *e_means*.py | grep -v -e utils -e conditions)
   abort at the first `torch.cuda.is_available()`.
 - GPU-free checks worth knowing: `torch_test_e_means_ptx_free.py` (no inline assembly, no FMA
   contraction on four AMD targets plus sm90), `torch_test_e_means_amd_fences.py` (NVIDIA-only
-  features stay off on AMD), `torch_test_e_means_backend_selection.py` and
+  features stay off on AMD), `torch_test_e_means_int8_compile.py` (INT8 shared-memory fit on four
+  AMD targets), `torch_test_e_means_backend_selection.py` and
   `torch_test_e_means_device_profile.py` (mocked devices).
 - On the GPU, `torch_test_e_means_triton_numerics.py` checks the rewritten kernels bit for bit
-  against PyTorch and correctly rounded references.
+  against PyTorch and correctly rounded references, and `torch_test_e_means_fp8_amd.py` checks the
+  FP8 encode and the `ldexp` replacement against PyTorch.
 - `torch_test_e_means_ivf.py::TestIVFFlat::test_all_probes_split_tiles_empty_lists_and_ties`
   used to fail by one rounding step on this torch build (also on the unmodified upstream
   snapshot): the ROCm wheels use OpenBLAS, whose FP32 CPU matmul results depend on the matrix
@@ -187,19 +204,18 @@ the upstream configuration's results):
 python tools/tune_assign.py --quick --k 1024 16384     # full sweep, about two hours on gfx1200
 python tools/tune_assign.py --compare                  # upstream constants vs this GPU's table
 python tools/tune_assign.py --dtypes int8 --quick      # INT8 kernel sweep (about 45 min on gfx1200)
+python tools/tune_assign.py --dtypes fp8 --quick --d 64 128 256 768   # FP8 sweep (d % 64 == 0)
 python tools/tune_split_k.py                           # direct vs split-K on small row counts
 ```
 
 ## Roadmap
 
-| Version | Scope | Hardware |
-|---|---|---|
-| **v0.1** (released) | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | local RX 9060 XT |
-| v0.2 | MI300X (gfx942) validation and tuning; INT8 on all four families; native FP8 on gfx120x and gfx950; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) and RX 9060 XT |
-| v0.3 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X |
-| v0.4 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) |
-
-Native FP8 on gfx120x and gfx950 moved from v0.3 into v0.2 while the cloud session waits.
+| Version | Scope | Hardware | Status |
+|---|---|---|---|
+| **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950 (moved from v0.3); RDNA4 tuning for both; MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | RX 9060 XT and MI300X (cloud) | RX 9000 part **done**; MI300X part waiting for a cloud session |
+| v0.3 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X | planned |
+| v0.4 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
 
 **v0.1 status (released 2026-11-19, tag `e-means-rocm-v0.1`)**
 
@@ -226,19 +242,27 @@ Acceptance for v0.1, on gfx1200:
 | Triton faster than PyTorch for BF16 | met (2.1× to 4.8×) |
 | NVIDIA behaviour unchanged | **partly**: selection checked with mocked devices, kernels compiled for sm90 and checked; no run on NVIDIA hardware |
 
-**v0.2 progress**
+**v0.2 status**
 
-| Item | Status |
+Done on RX 9000 (gfx1200):
+
+| Item | Result |
 |---|---|
-| INT8/UINT8 on the four AMD families | done on gfx1200: tests pass eager and with replay, distances exact against a float64 reference; gfx942 to run in the cloud session |
-| RDNA4 INT8 tuning table | done: INT8 assignment kernel 2.4× to 9× faster than the NVIDIA-fitted settings; INT8 training now 1.07× to 1.37× faster than BF16 on gfx1200 (it was 1.16× slower) |
-| RDNA4 split-K cap | done: split-K only up to 512 rows on gfx120x; the NVIDIA-fitted rule chose it up to 4,096 to 8,192 rows, where it is 2.4× to 3.9× slower on gfx1200 |
-| IVF test on OpenBLAS builds | fixed (test tolerance; see Running the tests) |
-| RDNA4 small-batch settings | done: BF16/FP16 d ≤ 64 re-chosen (was down to 0.6× of upstream on small batches), INT8 small-batch rules |
-| FP8 on gfx950 and gfx120x (moved from v0.3) | done on gfx1200: tests pass eager and with replay, encode exact for all FP32 values up to 448, `ldexp` replaced by an exact power-of-two multiply |
-| RDNA4 FP8 tuning table | done: FP8 assignment kernel 1.0× to 2.9× faster than the NVIDIA-fitted settings from 2,048 to 262,144 rows; FP8 training now 1.18× to 1.36× faster than BF16 (it was 0.79× to 1.08×) |
-| MI300X validation and tuning | scripts ready (`tools/gpu_session/`); cloud session not run yet |
-| Hand-written backend gate | measurement script ready (`tools/gemm_gate.py`); runs in the same session |
+| INT8/UINT8 on the four AMD families | runs on gfx1200; distances exact against a float64 reference; compile-checked (LDS fit) on the other three |
+| FP8 (E4M3) on gfx120x and gfx950 | runs on gfx1200; encode identical to PyTorch for all 2.28 billion FP32 values up to 448; `libdevice.ldexp` replaced by an exact power-of-two multiply; gfx942 and gfx11xx refuse FP8 |
+| RDNA4 INT8 and FP8 tuning | INT8 and FP8 now train faster than BF16 (see Results) |
+| RDNA4 small batches | BF16/FP16 d ≤ 64 settings re-chosen (were down to 0.6× of upstream on small batches); INT8 small-batch rules |
+| RDNA4 split-K | used only up to 512 rows; the NVIDIA-fitted rule chose it up to 4,096 to 8,192 rows, 2.4× to 3.9× slower there |
+| Tests | 253 passed eager, 257 with graph replay, none failing (an upstream IVF test made robust to OpenBLAS builds) |
+| Cloud session tooling | `tools/gpu_session/` (setup and one-shot runner), `tools/gemm_gate.py`, `tools/bench_train.py`, `tools/tune_split_k.py`, INT8/FP8 modes in `tools/tune_assign.py` |
+
+Remaining, needs an MI300X:
+
+| Item | Plan |
+|---|---|
+| gfx942 validation | smoke matrix, test suite (eager and replay), INT8 there |
+| gfx942 tuning | `cdna3` entries for the BF16, INT8 and split-K tables; graph-replay default decided on measured speed |
+| Hand-written backend gate | Triton BF16 assignment against rocBLAS/hipBLASLt GEMM; build a FlyDSL backend (v0.3) only if Triton trails by more than about 20% |
 
 **Not covered yet.** gfx942 (MI300), gfx950 (MI350) and gfx11xx (RX 7000) select the same
 Triton paths (FP32/FP16/BF16 and INT8) and compile cleanly, but have not been run and use the
