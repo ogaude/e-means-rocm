@@ -11,8 +11,12 @@ timeout. Inside it, one short train() compiles the kernels, then train() with
 Precisions: bf16 = FP32 input with the default FP32 -> BF16 cast (what
 Emeans(d, k).train(x) does); fp16 = FP32 input cast to FP16; fp32 = FP32 data with
 no quantizer; int8 / fp8 = FP32 data encoded once with a calibrated Int8Quantizer /
-Fp8Quantizer, trained on the codes (Triton only: the PyTorch backend has no byte path). Backends: triton, native (PyTorch). Replay 1 sets
-EMEANS_ROCM_GRAPH_REPLAY=1 (ignored on NVIDIA, where replay is always on).
+Fp8Quantizer, trained on the codes (Triton only: the PyTorch backend has no byte
+path; encoding is done before timing, while bf16/fp16 convert during training).
+Backends: triton, native (PyTorch). Replay 1 sets EMEANS_ROCM_GRAPH_REPLAY=1 (ignored
+on NVIDIA, where replay is always on). --no-tables clears the per-family AMD tuning
+tables (direct, INT8, split-K), so the NVIDIA-fitted settings run: compare a run with
+and without it to measure what the tuning gains.
 
 Results: a table on stdout and JSON lines in --out.
 """
@@ -24,8 +28,14 @@ import sys
 import time
 
 
-def run_case(rows, d, k, precision, backend, epochs, repeat):
+def run_case(rows, d, k, precision, backend, epochs, repeat, no_tables=False):
     import torch
+    if no_tables:
+        from faiss.contrib.e_means import triton_assignment as ta
+        for table in (ta._AMD_DIRECT_CONFIGS, ta._AMD_INT8_CONFIGS,
+                      ta._AMD_INT8_SMALL_CONFIGS, ta._AMD_SPLIT_K_MAX_ROW_BLOCKS,
+                      ta._AMD_SPLIT_K_STAGES):
+            table.clear()
     from faiss.contrib.e_means import quantizer
     from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans
     from faiss.contrib.e_means.quantizer_fp8 import Fp8Quantizer
@@ -90,6 +100,8 @@ def main():
     ap.add_argument("--repeat", type=int, default=2)
     ap.add_argument("--timeout", type=int, default=900, help="seconds per case")
     ap.add_argument("--out", default="bench_train.jsonl")
+    ap.add_argument("--no-tables", action="store_true",
+                    help="clear the AMD tuning tables (NVIDIA-fitted settings)")
     ap.add_argument("--case", help=argparse.SUPPRESS)
     a = ap.parse_args()
     unknown = set(a.precisions) - {"bf16", "fp16", "fp32", "int8", "fp8"}
@@ -98,7 +110,7 @@ def main():
 
     if a.case:
         shape, precision, backend = a.case.split(",")
-        run_case(*parse_shape(shape), precision, backend, a.epochs, a.repeat)
+        run_case(*parse_shape(shape), precision, backend, a.epochs, a.repeat, a.no_tables)
         return
 
     results = []
@@ -113,8 +125,10 @@ def main():
                         cmd = [sys.executable, __file__, "--case",
                                "%s,%s,%s" % (shape, precision, backend),
                                "--epochs", str(a.epochs), "--repeat", str(a.repeat)]
+                        if a.no_tables:
+                            cmd.append("--no-tables")
                         r = {"shape": shape, "precision": precision, "backend": backend,
-                             "replay": replay, "epochs": a.epochs}
+                             "replay": replay, "epochs": a.epochs, "tables": not a.no_tables}
                         try:
                             p = subprocess.run(cmd, capture_output=True, text=True,
                                                timeout=a.timeout, env=env)

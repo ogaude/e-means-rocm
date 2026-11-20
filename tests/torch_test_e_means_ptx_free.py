@@ -160,6 +160,43 @@ class PtxFreeKernelsTest(unittest.TestCase):
         for op in ("mul.rn.f32", "add.rn.f32", "sub.rn.f32", "div.rn.f32"):
             self.assertIn(op, ptx)
 
+    def test_nvidia_sm90_split_and_cast_kernels(self):
+        # The split and FP8-cast kernels hold 7 of the 10 former PTX sites. On sm90 every
+        # float multiply/add/subtract must be an explicitly rounded .rn instruction (as
+        # the inline assembly was), FMA only where the assembly had one (the affine
+        # cast), and the BF16 split must round with cvt.rn.bf16.f32.
+        unrounded = re.compile(r"\b(mul|add|sub)\.f32\b")
+        target = GPUTarget("cuda", 90, 32)
+
+        def ptx(fn, signature, constexprs):
+            sig = dict(signature, **{name: "constexpr" for name in constexprs})
+            return triton.compile(ASTSource(fn=fn, signature=sig, constexprs=constexprs),
+                                  target=target,
+                                  options=dict(num_warps=4, enable_fp_fusion=False)).asm["ptx"]
+
+        split_cases = dict(SPLIT_CASES)
+        split_cases["fp8 scaled, libdevice ldexp"] = dict(
+            BF16=False, FP8=True, SCALED=True, BLOCK_D=128, LIBDEVICE_LDEXP=True)
+        for label, constexprs in split_cases.items():
+            if not constexprs.get("LIBDEVICE_LDEXP", True):
+                continue  # the AMD power-of-two path is not used on NVIDIA
+            with self.subTest(kernel="split", case=label):
+                code = ptx(ta._write_float_splits_kernel, SPLIT_SIG, constexprs)
+                self.assertIsNone(unrounded.search(code))
+                if not constexprs["SCALED"]:  # libdevice ldexp brings its own code
+                    self.assertNotIn("fma", code)
+                if constexprs["BF16"]:
+                    self.assertIn("cvt.rn.bf16.f32", code)
+        for label, constexprs in CAST_CASES.items():
+            with self.subTest(kernel="cast", case=label):
+                code = ptx(ta._cast_fp8_centroids_kernel, CAST_SIG, constexprs)
+                self.assertIsNone(unrounded.search(code))
+                if constexprs["AFFINE"]:
+                    self.assertIn("fma.rn.f32", code)
+                else:
+                    self.assertNotIn("fma", code)
+                    self.assertIn("mul.rn.f32", code)
+
 
 if __name__ == "__main__":
     unittest.main()

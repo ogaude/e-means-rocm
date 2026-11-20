@@ -17,7 +17,9 @@ from faiss.contrib.e_means import DistributedEmeans
 from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans
 from faiss.contrib.e_means.quantizer import CastQuantizer
 from faiss.contrib.e_means.quantizer_int8 import Int8Quantizer
-from faiss.contrib.e_means.device_profile import amd_triton_supported
+from faiss.contrib.e_means.device_profile import (
+    amd_native_reduced_supported, amd_triton_supported,
+)
 
 # The GPU contracts use the automatic BF16 representation and the Triton,
 # CuTe and FP8 paths, so they need NVIDIA SM80 or later.
@@ -1146,10 +1148,14 @@ class TestDistributedEmeans(unittest.TestCase):
     @unittest.skipUnless(
         torch.cuda.is_available()
         and (getattr(torch.version, "hip", None) is not None
+             # On AMD, BF16 needs Triton or native PyTorch BF16 (addmm out_dtype);
+             # either one means no error is raised.
              and not amd_triton_supported("cuda")
+             and not amd_native_reduced_supported("cuda")
              or getattr(torch.version, "hip", None) is None
              and torch.cuda.get_device_capability() < (8, 0)),
-        "a GPU without BF16 support required (not NVIDIA SM80+, not an AMD target family)",
+        "a GPU without BF16 support required (not NVIDIA SM80+; on AMD neither Triton nor "
+        "native BF16)",
     )
     def test_bf16_without_sm80_names_the_cause(self):
         with self.assertRaisesRegex(RuntimeError, "SM80"):

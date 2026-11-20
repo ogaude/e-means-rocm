@@ -94,7 +94,61 @@ _AMD_DIRECT_CONFIGS = {
             (None, (64, 256, 64, 8, 1)),        # 1.37-2.21x
         ),
     },
+    # cdna4 (gfx950, MI350): not tuned and never run. These are the constants above,
+    # except BLOCK_B 64 instead of 128 at d > 128: the 128-row BF16/FP16 tile compiles
+    # to 96 KiB of LDS on gfx950 (Triton 3.8), over the 64 KiB budget device_profile
+    # assumes for cdna4 until measured. TO TEST on MI350 hardware: if its per-workgroup
+    # LDS is larger, raise cdna4's lds_bytes and drop this entry (and the cdna4 split-K
+    # stage cap below) after timing both.
+    "cdna4": {
+        "reduced": (
+            (64, (_DIRECT_BLOCK_B, _DIRECT_BLOCK_K, _DIRECT_REDUCED_BLOCK_D, 8, _NUM_STAGES)),
+            (128, (_FULL_D_CONFIG[0], _FULL_D_CONFIG[1], None, _FULL_D_CONFIG[2],
+                   _FULL_D_CONFIG[3])),
+            (None, (_DIRECT_BLOCK_B, _DIRECT_BLOCK_K, _DIRECT_REDUCED_BLOCK_D, 8, _NUM_STAGES)),
+        ),
+    },
 }
+
+
+def _direct_config(family, is_reduced, is_fp8, d, wide_rows_ok=True):
+    """Direct-kernel (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
+
+    ``family`` is the AMD architecture family, or None on NVIDIA and untuned devices
+    (then the module constants apply, as upstream). ``wide_rows_ok`` says whether the
+    tensors allow the 128-row reduced-precision tile at d > 128 (unit stride,
+    16-element pitch, 16-byte alignment). Pure, so tests can check every family.
+    """
+    full_d = is_reduced and _DIRECT_REDUCED_BLOCK_D < d <= _FULL_D_MAX_D
+    direct_block_d = _DIRECT_REDUCED_BLOCK_D if is_reduced else _DIRECT_FP32_BLOCK_D
+    # E4M3 benefits from a wider contraction tile when it adds no padded work.
+    if (is_fp8 and triton.cdiv(d, 128) * 128
+            == triton.cdiv(d, _DIRECT_REDUCED_BLOCK_D) * _DIRECT_REDUCED_BLOCK_D):
+        direct_block_d = 128
+    rules = _AMD_DIRECT_CONFIGS.get(family) if family is not None else None
+    kind = "fp8" if is_fp8 else "reduced" if is_reduced else "fp32"
+    for max_d, config in (rules or {}).get(kind, ()):
+        if max_d is None or d <= max_d:
+            block_b, block_k, block_d, num_warps, num_stages = config
+            if full_d:
+                block_d = max(16, triton.next_power_of_2(d))
+            return full_d, block_b, block_k, block_d, num_warps, num_stages
+    if full_d:
+        block_b, block_k, num_warps, num_stages = _FULL_D_CONFIG
+        return full_d, block_b, block_k, max(16, triton.next_power_of_2(d)), num_warps, num_stages
+    block_b = (128 if is_reduced and not is_fp8 and d > _FULL_D_MAX_D and d % 16 == 0
+               and wide_rows_ok else _DIRECT_BLOCK_B)
+    block_k = _DIRECT_BLOCK_K if is_reduced else 128
+    return False, block_b, block_k, direct_block_d, 8, _NUM_STAGES
+
+
+def _amd_family(device):
+    """AMD architecture family of a device, or None on NVIDIA (and CPU)."""
+    if torch.version.hip is None:
+        return None
+    from .device_profile import device_profile
+
+    return device_profile(device).family
 
 
 def _amd_direct_config(device, is_reduced, d, fp8=False):
@@ -887,6 +941,10 @@ def _use_split_k(b, k, d, is_reduced, direct_block_d=_DIRECT_REDUCED_BLOCK_D):
 # at 1,024 rows 0.39-0.63x (except 1.02-1.14x at d = 128) and at 4,096 rows 0.26-0.41x,
 # where _use_split_k still chose it. Families without an entry keep _use_split_k.
 _AMD_SPLIT_K_MAX_ROW_BLOCKS = {"rdna4": 8}
+# Split-K pipeline stages per AMD family (default _SPLIT_K_NUM_STAGES). cdna4: two
+# stages compile to 96 KiB of LDS for BF16 on gfx950, over the assumed 64 KiB budget;
+# one stage needs 16 KiB. TO TEST on MI350 hardware, with the cdna4 direct entry.
+_AMD_SPLIT_K_STAGES = {"cdna4": 1}
 
 
 def _select_split_k(device, b, k, d, is_reduced, direct_block_d=_DIRECT_REDUCED_BLOCK_D):
@@ -966,24 +1024,11 @@ def _launch_assignment(
                 for t in (x, centroids)
             )
         )
-        tuned = _amd_direct_config(x.device, is_reduced, d, fp8=is_fp8)
-        if tuned is not None:
-            block_b, block_k, block_d, num_warps, num_stages = tuned
-            if full_d:
-                block_d = max(16, triton.next_power_of_2(d))
-        elif full_d:
-            block_b, block_k, num_warps, num_stages = _FULL_D_CONFIG
-            block_d = max(16, triton.next_power_of_2(d))
-        else:
-            # Match Triton's D/element-stride divisibility and pointer alignment.
-            block_b = (128 if is_reduced and not is_fp8 and d > _FULL_D_MAX_D and d % 16 == 0
-                       and all(t.stride(1) == 1 and t.stride(0) % 16 == 0
-                               and t.data_ptr() % 16 == 0 for t in (x, centroids))
-                       else _DIRECT_BLOCK_B)
-            block_k = _DIRECT_BLOCK_K if is_reduced else 128
-            block_d = direct_block_d
-            num_warps = 8
-            num_stages = _NUM_STAGES
+        # Match Triton's D/element-stride divisibility and pointer alignment.
+        wide_rows_ok = all(t.stride(1) == 1 and t.stride(0) % 16 == 0
+                           and t.data_ptr() % 16 == 0 for t in (x, centroids))
+        _, block_b, block_k, block_d, num_warps, num_stages = _direct_config(
+            _amd_family(x.device), is_reduced, is_fp8, d, wide_rows_ok)
         if is_fp8 and use_descriptors:
             block_b = 128
         descriptors = {}
@@ -1053,7 +1098,7 @@ def _launch_assignment(
         FP8=is_fp8,
         WIDE_CENTROID=wide_centroid,
         num_warps=_SPLIT_K_NUM_WARPS,
-        num_stages=_SPLIT_K_NUM_STAGES,
+        num_stages=_AMD_SPLIT_K_STAGES.get(_amd_family(x.device), _SPLIT_K_NUM_STAGES),
     )
     _reduce_split_k_kernel[(b,)](
         x,

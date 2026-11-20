@@ -6,11 +6,17 @@
 #     rtne)) gives exactly PyTorch's float8_e4m3fn codes for every value the range
 #     check admits (|v| <= 448): the whole FP16 grid, every tie between neighbouring
 #     codes and its FP32 neighbours, subnormals, and random FP32;
+#   * the same with a quantizer: the scaled (value * scale) and affine (one-rounding
+#     fma(value, scale, shift)) paths of the cast kernel against PyTorch, and the peak;
 #   * _pow2, which replaces libdevice.ldexp on AMD in the scaled FP8 split, gives
 #     exactly torch.ldexp for every finite E4M3 value and every decode exponent in
 #     [-127, 127], subnormal results included.
+#   * opt-in (EMEANS_EXHAUSTIVE_TESTS=1): every FP32 value with |v| <= 448, 2.28e9 of
+#     them, through the cast kernel (a few seconds on an RX 9060 XT).
 
+import os
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -94,6 +100,71 @@ class Fp8EncodeParityTest(unittest.TestCase):
         values = values[torch.isfinite(values)]
         uniform = (torch.rand(4_000_000, generator=g) * 2 - 1) * E4M3_MAX
         self.assert_same_codes(torch.cat([values, uniform]))
+
+
+@unittest.skipUnless(FP8_GPU, "FP8-capable Triton GPU required")
+class Fp8QuantizedCastParityTest(unittest.TestCase):
+    """The cast kernel's scaled and affine paths against PyTorch, codes and peak."""
+
+    def _check(self, values, scale, bias):
+        d = values.shape[1]
+        reference = values * scale if bias is None else values * scale + bias
+        keep = (reference.abs() <= E4M3_MAX).all(dim=1)
+        values, reference = values[keep].contiguous(), reference[keep]
+        quantizer = SimpleNamespace(scale=scale, _bias=bias)
+        peak = torch.zeros((), device="cuda")
+        codes, squares = ta._cast_fp8_centroids(values, quantizer, peak)
+        expected = reference.to(torch.float8_e4m3fn)
+        got = codes[:, :d].contiguous()
+        mismatch = _bits(got) != _bits(expected)
+        self.assertFalse(bool(mismatch.any()), "%d codes differ, e.g. %s" % (
+            int(mismatch.sum()), reference[mismatch][:5].tolist()))
+        self.assertEqual(float(peak), float(reference.abs().max()))
+        torch.testing.assert_close(squares, expected.float().square().sum(dim=1),
+                                   rtol=0, atol=0)
+
+    def _rows(self, seed, n=200_000, d=64):
+        g = torch.Generator(device="cuda").manual_seed(seed)
+        rows = torch.randn((n, d), device="cuda", generator=g) * 30
+        # Exact E4M3 values and midpoints after scaling by 1/8: ties land on codes.
+        codes = torch.arange(0, 0x7F, dtype=torch.uint8).view(torch.float8_e4m3fn).float()
+        mids = (codes[:-1] + codes[1:]) / 2
+        special = torch.cat([codes, mids, -codes, -mids]).cuda() * 8.0
+        rows.view(-1)[: len(special)] = special
+        return rows
+
+    def test_scaled(self):
+        for scale in (0.125, 1.0, 4.0):
+            with self.subTest(scale=scale):
+                self._check(self._rows(1), scale, None)
+
+    def test_affine(self):
+        for scale in (0.125, 2.0):
+            with self.subTest(scale=scale):
+                g = torch.Generator(device="cuda").manual_seed(2)
+                bias = torch.randn(64, device="cuda", generator=g) * 20
+                self._check(self._rows(3), scale, bias.contiguous())
+
+
+@unittest.skipUnless(FP8_GPU and os.environ.get("EMEANS_EXHAUSTIVE_TESTS") == "1",
+                     "set EMEANS_EXHAUSTIVE_TESTS=1 on an FP8-capable Triton GPU")
+class Fp8ExhaustiveEncodeTest(unittest.TestCase):
+    """Every FP32 value with |v| <= 448 encodes as torch.float8_e4m3fn does."""
+
+    def test_every_value_up_to_448(self):
+        limit = torch.tensor(E4M3_MAX).view(torch.int32).item()  # bits of 448.0
+        chunk, checked, mismatches = 1 << 25, 0, 0
+        for sign in (0, 1 << 31):
+            for start in range(0, limit + 1, chunk):
+                bits = torch.arange(start, min(start + chunk, limit + 1), device="cuda",
+                                    dtype=torch.int64) | sign
+                values = bits.to(torch.int32).view(torch.float32)
+                got = _triton_codes(values)
+                expected = values.to(torch.float8_e4m3fn)
+                mismatches += int((_bits(got) != _bits(expected)).sum())
+                checked += values.numel()
+        self.assertEqual(checked, 2 * (limit + 1))
+        self.assertEqual(mismatches, 0)
 
 
 @unittest.skipUnless(FP8_GPU, "FP8-capable Triton GPU required")
