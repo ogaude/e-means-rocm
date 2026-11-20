@@ -4,7 +4,7 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2 released (tag `e-means-rocm-v0.2`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
+> **Status: v0.2.1 released (tag `e-means-rocm-v0.2.1`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.1× to 9.3× faster than
@@ -272,7 +272,7 @@ tuning sequence on a fresh cloud GPU; see their READMEs.
 | Version | Scope | Hardware | Status |
 |---|---|---|---|
 | **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
-| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20 |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day |
 | v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready |
 | v0.4 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.3's measurement calls for it | RX 9060 XT and MI300X | planned |
 | v0.5 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
@@ -290,6 +290,14 @@ could be released without waiting for cloud access, and the later versions moved
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.1 (2026-11-20, tag `e-means-rocm-v0.2.1`)**: fixes from an independent review. gfx950
+(MI350) capped to fit 64 KiB of LDS (its BF16/FP16 128-row tile and two-stage split-K needed
+96 KiB; to be tested on hardware); a GPU-free test of every launch configuration on all four
+AMD families; sm90 compiles of the split and FP8-cast kernels; FP8 quantized-encode parity and
+an opt-in exhaustive encode test; a wrong test skip condition fixed; `bench_train.py
+--no-tables`; documentation matched to code and tests. 269 tests passed eager, 273 with graph
+replay, none failing.
 
 **v0.2 (2026-11-20, tag `e-means-rocm-v0.2`)**, all on RX 9000 (gfx1200):
 
