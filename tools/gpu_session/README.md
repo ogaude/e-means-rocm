@@ -1,7 +1,7 @@
 # GPU session scripts
 
 These scripts run the whole e-means validation and tuning sequence on one GPU machine
-and collect the results. They are built for a short-lived cloud VM (the v0.2 MI300X
+and collect the results. They are built for a short-lived cloud VM (the v0.3 MI300X
 session), so the VM is created, used and destroyed in one sitting. They also run on a
 local card.
 

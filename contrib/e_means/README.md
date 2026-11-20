@@ -418,7 +418,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   10.1) every precision above trains, the e-means tests pass, and Triton is 2.1× to 4.8× faster
   than PyTorch for BF16 and FP16. RX 9000 GPUs use tile settings tuned for them, which make the
   assignment kernel up to 2.7× faster and training 1.25× to 1.35× faster than the NVIDIA-fitted
-  defaults (INT8: see ⁶). MI300 validation and tuning are planned next; MI350 and RX 7000 are compile-checked
+  defaults (INT8: see ⁶). MI300 validation and tuning are planned for v0.3; MI350 and RX 7000 are compile-checked
   only and use the NVIDIA-fitted tile settings.
   Other AMD GPUs (for example MI200, gfx90a) run native FP32 through PyTorch only; there, FP32 data stays FP32 instead of being converted to BF16.
   On the four families without Triton, the automatic choice uses the slower PyTorch path (BF16 by
@@ -436,7 +436,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   and INT8 training is 1.07× to 1.37× faster than BF16 (1M × 64 to 4M × 128 vectors, 4,096 to
   16,384 centroids, final loss within 0.06% of BF16). Elsewhere the pipeline depth is set per
   family so the kernel fits in 64 KiB of shared memory (upstream's setting needs up to 112 KiB
-  outside MI300). MI300 is checked in the v0.2 cloud session; MI350 and RX 7000 are
+  outside MI300). MI300 is to be checked in the v0.3 cloud session; MI350 and RX 7000 are
   compile-checked only.
 - On the CPU, computation remains FP32 (see On the CPU).
 

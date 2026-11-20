@@ -4,12 +4,12 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.1 released (tag `e-means-rocm-v0.1`); v0.2 done on RX 9000, MI300X pending.**
+> **Status: v0.2 released (tag `e-means-rocm-v0.2`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit. Triton is 2.1× to 9.3× faster than
 > PyTorch for BF16, and tuned FP8 and INT8 train 1.0× to 1.4× faster than BF16. gfx942 (MI300X)
-> waits for a cloud session; gfx950 and gfx11xx are compile-checked only. **NVIDIA has not been
+> is planned for v0.3 (cloud); gfx950 and gfx11xx are compile-checked only. **NVIDIA has not been
 > re-run on hardware:** "NVIDIA unchanged" rests on mocked-device tests and sm90 compiles (see
 > v0.1 acceptance).
 
@@ -17,7 +17,7 @@ fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 | Family | Architecture | Example GPUs | FP32 / FP16 / BF16 | INT8 | FP8 (E4M3) |
 |---|---|---|---|---|---|
-| CDNA 3 | gfx942 | MI300X, MI325X | compile-checked; run and tuning in v0.2 (cloud) | compile-checked | refused (no native E4M3) |
+| CDNA 3 | gfx942 | MI300X, MI325X | compile-checked; run and tuning in v0.3 (cloud) | compile-checked | refused (no native E4M3) |
 | CDNA 4 | gfx950 | MI350 series | compile-checked | compile-checked | compile-checked |
 | RDNA 3 | gfx11xx | RX 7000 series | compile-checked | compile-checked | refused (no native E4M3) |
 | RDNA 4 | gfx120x | RX 9000 series | **runs, tuned** (v0.1) | **runs, tuned** (v0.2) | **runs, tuned** (v0.2) |
@@ -213,9 +213,13 @@ python tools/tune_split_k.py                           # direct vs split-K on sm
 | Version | Scope | Hardware | Status |
 |---|---|---|---|
 | **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
-| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950 (moved from v0.3); RDNA4 tuning for both; MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | RX 9060 XT and MI300X (cloud) | RX 9000 part **done**; MI300X part waiting for a cloud session |
-| v0.3 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.2's measurement calls for it | RX 9060 XT and MI300X | planned |
-| v0.4 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20 |
+| v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready |
+| v0.4 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.3's measurement calls for it | RX 9060 XT and MI300X | planned |
+| v0.5 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
+
+The MI300X work was first planned for v0.2; it moved to v0.3 (2026-11-20) so the RX 9000 work
+could be released without waiting for cloud access, and the later versions moved up by one.
 
 **v0.1 status (released 2026-11-19, tag `e-means-rocm-v0.1`)**
 
@@ -242,9 +246,9 @@ Acceptance for v0.1, on gfx1200:
 | Triton faster than PyTorch for BF16 | met (2.1× to 4.8×) |
 | NVIDIA behaviour unchanged | **partly**: selection checked with mocked devices, kernels compiled for sm90 and checked; no run on NVIDIA hardware |
 
-**v0.2 status**
+**v0.2 status (released 2026-11-20, tag `e-means-rocm-v0.2`)**
 
-Done on RX 9000 (gfx1200):
+All on RX 9000 (gfx1200):
 
 | Item | Result |
 |---|---|
@@ -256,20 +260,19 @@ Done on RX 9000 (gfx1200):
 | Tests | 253 passed eager, 257 with graph replay, none failing (an upstream IVF test made robust to OpenBLAS builds) |
 | Cloud session tooling | `tools/gpu_session/` (setup and one-shot runner), `tools/gemm_gate.py`, `tools/bench_train.py`, `tools/tune_split_k.py`, INT8/FP8 modes in `tools/tune_assign.py` |
 
-Remaining, needs an MI300X:
+**v0.3 plan (needs an MI300X)**
 
 | Item | Plan |
 |---|---|
 | gfx942 validation | smoke matrix, test suite (eager and replay), INT8 there |
 | gfx942 tuning | `cdna3` entries for the BF16, INT8 and split-K tables; graph-replay default decided on measured speed |
-| Hand-written backend gate | Triton BF16 assignment against rocBLAS/hipBLASLt GEMM; build a FlyDSL backend (v0.3) only if Triton trails by more than about 20% |
+| Hand-written backend gate | Triton BF16 assignment against rocBLAS/hipBLASLt GEMM; build a FlyDSL backend (v0.4) only if Triton trails by more than about 20% |
 
 **Not covered yet.** gfx942 (MI300), gfx950 (MI350) and gfx11xx (RX 7000) select the same
 Triton paths (FP32/FP16/BF16 and INT8) and compile cleanly, but have not been run and use the
 upstream (NVIDIA-fitted) tile settings: expected to work, not validated and not tuned. MI300 is
-covered by v0.2's cloud session. FP8 runs only where E4M3 is native (gfx120x, gfx950); MI300
-and RX 7000 refuse it. Several GPUs are
-expected to work but are untested until v0.4.
+covered by v0.3's cloud session. FP8 runs only where E4M3 is native (gfx120x, gfx950); MI300
+and RX 7000 refuse it. Several GPUs are expected to work but are untested until v0.5.
 
 ## Repository layout
 
