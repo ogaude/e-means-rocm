@@ -76,13 +76,28 @@ class AmdSelectionTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 select_backend(X, torch.bfloat16, K, D)
 
-    def test_int8_and_fp8_say_planned(self):
-        for dtype, message in ((torch.int8, "INT8 assignment requires.*planned"),
-                               (torch.uint8, "INT8 assignment requires.*planned"),
-                               (torch.float8_e4m3fn, "float8_e4m3fn assignment requires.*planned")):
-            with self.subTest(dtype=dtype), amd("gfx1200"):
-                with self.assertRaisesRegex(RuntimeError, message):
-                    select_backend(X, dtype, K, D)
+    def test_int8_selects_triton_on_target_families(self):
+        for arch in ("gfx942", "gfx950", "gfx1100", "gfx1200", "gfx1201"):
+            for dtype in (torch.int8, torch.uint8):
+                with self.subTest(arch=arch, dtype=dtype), amd(arch):
+                    self.assertIs(select_backend(X, dtype, K, D), TritonBackend)
+
+    def test_int8_rejected_on_unknown_family_or_without_triton(self):
+        for arch, triton in (("gfx90a", True), ("gfx1200", False)):
+            with self.subTest(arch=arch, triton=triton), amd(arch, triton=triton):
+                with self.assertRaisesRegex(RuntimeError, "INT8 assignment requires.*AMD gfx942"):
+                    select_backend(X, torch.int8, K, D)
+
+    def test_int8_dimension_bound_carries_over(self):
+        with amd("gfx942"):
+            with self.assertRaisesRegex(ValueError, "d <= 43919"):
+                select_backend(X, torch.int8, K, 43920)
+
+    def test_fp8_says_planned(self):
+        with amd("gfx1200"):
+            with self.assertRaisesRegex(RuntimeError,
+                                        "float8_e4m3fn assignment requires.*planned"):
+                select_backend(X, torch.float8_e4m3fn, K, D)
 
     def test_explicit_requests_pass_through(self):
         with amd("gfx90a"):
@@ -96,6 +111,16 @@ class NvidiaSelectionUnchangedTest(unittest.TestCase):
     def test_sm90_bf16_selects_cute(self):
         with nvidia((9, 0)):
             self.assertIs(select_backend(X, torch.bfloat16, K, D), CuteBackend)
+
+    def test_int8_unchanged(self):
+        for capability in ((8, 0), (9, 0), (10, 0)):
+            with self.subTest(capability=capability), nvidia(capability):
+                self.assertIs(select_backend(X, torch.int8, K, D), TritonBackend)
+        with nvidia((8, 6)):
+            with self.assertRaises(RuntimeError) as caught:
+                select_backend(X, torch.int8, K, D)
+        self.assertEqual(str(caught.exception),
+                         "INT8 assignment requires an NVIDIA SM80, SM90, or SM100 GPU")
 
     def test_sm80_selects_triton(self):
         with nvidia((8, 0)):

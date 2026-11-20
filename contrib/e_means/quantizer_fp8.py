@@ -35,7 +35,7 @@ def _check_fp8_support(device):
     if getattr(torch.version, "hip", None) is not None:
         raise RuntimeError(
             "float8_e4m3fn assignment requires an NVIDIA SM90, SM100, or SM103 GPU; "
-            "AMD support is planned (e-means-rocm v0.2: gfx950 and gfx120x), "
+            "AMD support is planned (e-means-rocm v0.3: gfx950 and gfx120x), "
             "use BF16, FP16 or FP32 for now"
         )
     capability = torch.cuda.get_device_capability(device)

@@ -98,6 +98,46 @@ def _amd_direct_config(device, is_reduced, d):
     return None
 
 
+# INT8 pipeline stages per AMD family (v0.2). Upstream hard-codes num_stages=3, which
+# fits gfx942 but not the other families: ROCm Triton 3.8 compiles the INT8 kernel to
+# this much LDS (bytes; tests/torch_test_e_means_int8_compile.py re-checks it offline):
+#
+#   path (BLOCK_D)        stages:  1      2      3
+#   FULL_D 128   gfx950        16384  33792  50176    gfx11xx/gfx120x  16384  17408  33792
+#   FULL_D 256   gfx950        32768  66560  99328    gfx11xx/gfx120x  32768  33792  66560
+#   tiled  128   gfx950        16384  81920 114688    gfx11xx/gfx120x  16384  49152  81920
+#   gfx942: 16384 (32768 for FULL_D 256) at any stage count.
+#
+# Each entry is the largest stage count (at most upstream's 3) inside the family's
+# 64 KiB LDS budget (device_profile; conservative for cdna4 and rdna3). Chosen for
+# fit, not speed: tune on hardware.
+_AMD_INT8_STAGES = {
+    #         FULL_D 128, FULL_D 256, tiled
+    "cdna3": (3, 3, 3),
+    "cdna4": (3, 1, 1),
+    "rdna3": (3, 2, 2),
+    "rdna4": (3, 2, 2),
+}
+
+
+def _int8_launch_config(physical_d, family=None):
+    """INT8 assignment (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
+
+    ``family`` is the AMD architecture family, or None on NVIDIA (upstream: 3 stages).
+    Pure, so offline compile tests can check every family's configuration.
+    """
+    full_d = physical_d <= 256
+    # Wider operands retain the original launch configuration.
+    block_b, block_k, num_warps = (128, 128, 4) if full_d else (_INT8_BLOCK_B, _INT8_BLOCK_K, 8)
+    block_d = (triton.next_power_of_2(max(_INT8_BLOCK_D, physical_d))
+               if full_d else _INT8_BLOCK_D)
+    num_stages = 3
+    if family is not None:
+        stages = _AMD_INT8_STAGES[family]
+        num_stages = stages[2] if not full_d else stages[0] if block_d <= 128 else stages[1]
+    return full_d, block_b, block_k, block_d, num_warps, num_stages
+
+
 _MAX_K = 2**31 - max(
     _SPLIT_K_MAX_PARTITIONS,
     _SPLIT_K_BLOCK_K,
@@ -1071,7 +1111,14 @@ def assign_int8_rows(
         raise ValueError("distance output must be a same-device contiguous FP32/INT64 vector")
 
     stage_rows = physical_d != d
-    full_d = physical_d <= 256
+    family = None
+    if torch.version.hip is not None:
+        from .device_profile import device_profile
+
+        family = device_profile(x.device).family
+    full_d, block_b, block_k, block_d, num_warps, num_stages = _int8_launch_config(
+        physical_d, family
+    )
     # The staged width is bounded and16-aligned by _int8_physical_d;
     # its CUDA allocation has aligned unit-stride rows. Check before staging.
     use_descriptors = (not full_d
@@ -1104,10 +1151,6 @@ def assign_int8_rows(
         wide_centroid = _centroid_offset_is_wide(
             centroids.shape, centroids.stride()
         )
-        # Wider operands retain the original launch configuration.
-        block_b, block_k, num_warps = (
-            (128, 128, 4) if full_d else (_INT8_BLOCK_B, _INT8_BLOCK_K, 8)
-        )
         descriptors = {}
         if use_descriptors:
             descriptors = dict(
@@ -1130,14 +1173,13 @@ def assign_int8_rows(
             UNSIGNED=unsigned,
             BLOCK_B=block_b,
             BLOCK_K=block_k,
-            BLOCK_D=(triton.next_power_of_2(max(_INT8_BLOCK_D, physical_d))
-                     if full_d else _INT8_BLOCK_D),
+            BLOCK_D=block_d,
             WIDE_CENTROID=wide_centroid,
             FULL_D=full_d,
             PACKED=48896 * physical_d * block_k + block_k - 1 < 2**31,
             **descriptors,
             num_warps=num_warps,
-            num_stages=3,
+            num_stages=num_stages,
         )
     return distance, labels
 

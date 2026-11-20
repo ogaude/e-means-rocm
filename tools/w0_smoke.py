@@ -65,6 +65,8 @@ def run_case(name, rows, d, k, epochs):
     q = kwargs.get("quantizer")
     if q is not None:
         q.train(x)
+        if qspec in ("int8", "fp8"):
+            x = q.compute_codes(x)  # byte quantizers train on their codes
 
     model = QuantizedEmeans(d, k, **kwargs)
     torch.cuda.synchronize()

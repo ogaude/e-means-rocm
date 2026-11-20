@@ -36,7 +36,8 @@ the default FP32 → BF16 conversion) raise an error, and every GPU test is skip
 | Device detection | New `device_profile.py`: tells NVIDIA from AMD (ROCm reports both as `"cuda"`) and maps AMD chips to a family with its wavefront size, LDS budget and matrix-instruction support. |
 | Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. The PyTorch backend also handles FP16/BF16 there (`torch.addmm(out_dtype=)`), as explicit `native` or as the fallback without Triton. CuTe and TMA descriptors are never selected on AMD. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs). Replay works on gfx1200 but gave no speed-up there, so `EMEANS_ROCM_GRAPH_REPLAY=1` opts in. |
-| Errors | FP8 and INT8 on AMD raise an error that says support is planned. |
+| INT8 (v0.2, in progress) | INT8/UINT8 assignment runs on the four families, with the pipeline depth set per family so the kernel fits in 64 KiB of LDS (upstream's three stages need up to 112 KiB outside gfx942). |
+| Errors | FP8 on AMD raises an error that says support is planned. |
 | Tests | Vendor-aware skips replace the blanket ROCm skips; new GPU-free compile tests and bit-level Triton-vs-PyTorch checks. |
 
 Supported data per GPU is in the kernel table of the
@@ -189,6 +190,14 @@ Acceptance for v0.1, on gfx1200:
 | EMA update and split bit-equal to PyTorch | met (`torch_test_e_means_triton_numerics.py`) |
 | Triton faster than PyTorch for BF16 | met (2.1× to 4.8×) |
 | NVIDIA behaviour unchanged | **partly**: selection checked with mocked devices, kernels compiled for sm90 and checked; no run on NVIDIA hardware |
+
+**v0.2 progress**
+
+| Item | Status |
+|---|---|
+| INT8/UINT8 on the four AMD families | done on gfx1200: tests pass eager and with replay, distances exact against a float64 reference on all three launch paths; about 16% slower than BF16 (1M × 128, k = 4,096), not tuned; gfx942 to run in the cloud session |
+| MI300X validation and tuning | scripts ready (`tools/gpu_session/`); cloud session not run yet |
+| Hand-written backend gate | measurement script ready (`tools/gemm_gate.py`); runs in the same session |
 
 **What v0.1 does not cover.** gfx942 (MI300), gfx950 (MI350) and gfx11xx (RX 7000) select the
 same Triton path and compile cleanly, but have not been run and use the upstream (NVIDIA-fitted)

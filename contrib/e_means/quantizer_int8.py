@@ -170,19 +170,25 @@ class Int8Quantizer:
 
 
 def _check_int8_support(device):
-    """Reject devices outside the qualified INT8 assignment targets."""
+    """Reject devices outside the qualified INT8 assignment targets.
+
+    NVIDIA: SM80, SM90 and SM100, as upstream. AMD: the four target families
+    (every one has an integer matrix instruction: MFMA i8 on CDNA, WMMA iu8 on RDNA),
+    with Triton installed.
+    """
     if device.type != "cuda":
         raise ValueError("INT8 assignment requires a CUDA tensor")
     if getattr(torch.version, "hip", None) is not None:
-        raise RuntimeError(
-            "INT8 assignment requires an NVIDIA SM80, SM90, or SM100 GPU; "
-            "AMD support is planned (e-means-rocm v0.2), use BF16, FP16 or FP32 for now"
-        )
+        from .device_profile import AMD_TARGETS, amd_triton_supported
+
+        if not amd_triton_supported(device):
+            raise RuntimeError(
+                "INT8 assignment requires an NVIDIA SM80, SM90, or SM100 GPU, "
+                "or an AMD %s GPU with Triton installed" % AMD_TARGETS
+            )
+        return
     capability = torch.cuda.get_device_capability(device)
-    if (
-        getattr(torch.version, "hip", None) is not None
-        or capability not in ((8, 0), (9, 0), (10, 0))
-    ):
+    if capability not in ((8, 0), (9, 0), (10, 0)):
         raise RuntimeError(
             "INT8 assignment requires an NVIDIA SM80, SM90, or SM100 GPU"
         )

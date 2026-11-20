@@ -29,11 +29,14 @@ from e_means_test_utils import (
     EmeansReferenceContracts, backend_class, native_options, highest_fp32, known_torch_centroids,
 )
 
-from e_means_gpu_conditions import graph_replay_gpu, native_reduced_gpu, nvidia_sm80, triton_gpu
+from e_means_gpu_conditions import (
+    amd_triton_gpu, graph_replay_gpu, native_reduced_gpu, nvidia_sm80, triton_gpu,
+)
 
-# NVIDIA SM80+ with Triton, exactly the upstream condition. FP8 and INT8 stay
-# NVIDIA-only: on ROCm get_device_capability() returns gfx numbers, and AMD
-# FP8/INT8 assignment is not supported before v0.2.
+# NVIDIA SM80+ with Triton, exactly the upstream condition. FP8 stays NVIDIA-only:
+# on ROCm get_device_capability() returns gfx numbers, and AMD FP8 assignment is
+# not supported before v0.3. INT8 runs on NVIDIA SM80/SM90/SM100 and on the AMD
+# target families (v0.2).
 TRITON_NVIDIA = nvidia_sm80() and importlib.util.find_spec("triton") is not None
 # The Triton backend runs here: NVIDIA SM80+ or an AMD target family.
 TRITON_CUDA = triton_gpu()
@@ -42,8 +45,8 @@ GRAPH_REPLAY = graph_replay_gpu()
 NATIVE_REDUCED = native_reduced_gpu()
 FP8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
             in ((9, 0), (10, 0), (10, 3)))
-INT8_CUDA = (TRITON_NVIDIA and torch.cuda.get_device_capability()
-             in ((8, 0), (9, 0), (10, 0)))
+INT8_CUDA = ((TRITON_NVIDIA and torch.cuda.get_device_capability()
+              in ((8, 0), (9, 0), (10, 0))) or amd_triton_gpu())
 
 
 def _cpu_gloo_replica(rank, rendezvous, numpy_state=False):
@@ -481,13 +484,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 q.decode(expected)
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((8, 0), (9, 0), (10, 0))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified INT8 CUDA required",
-    )
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_native_int8_uint8_and_decoded_training(self):
         for backend in self._byte_backends():
             base = torch.tensor([[-4.], [-2.], [4.], [6.]], device="cuda")
@@ -523,13 +520,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
                                      (torch.float32, torch.float32, torch.int64))
                     self.assertEqual(km.recipe["representation"], str(dtype).removeprefix("torch."))
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((8, 0), (9, 0), (10, 0))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified INT8 CUDA required",
-    )
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_raw_integer_statistics_dtype_and_totals(self):
         for dtype, value, cap in ((torch.int8, 127, 131072), (torch.uint8, 255, 65793)):
             for n in (0, 7, cap, cap + 1, 262145):
@@ -997,13 +988,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
             distance, _ = model.assign(torch.tensor([[2]], dtype=torch.int8, device=device))
             self.assertEqual((distance.item(), distance.device, torch.cuda.current_device()), (2.**-148, device, current))
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((8, 0), (9, 0), (10, 0))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified INT8 CUDA required",
-    )
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_raw_integer_closing_partition_and_assign(self):
         for dtype, value in ((torch.int8, 127), (torch.uint8, 255)):
             for batch in (65795, 131073):
@@ -1114,13 +1099,7 @@ class TestTorchEmeans(EmeansReferenceContracts, unittest.TestCase):
         distance, labels = pair.assign(query)
         self.assertEqual((distance.item(), labels.item()), (0., 1))
 
-    @unittest.skipUnless(
-        torch.cuda.is_available()
-        and getattr(torch.version, "hip", None) is None
-        and torch.cuda.get_device_capability() in ((8, 0), (9, 0), (10, 0))
-        and importlib.util.find_spec("triton") is not None,
-        "qualified INT8 CUDA required",
-    )
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_raw_integer_external_schema_empty_and_fresh_objects(self):
         for backend in self._byte_backends():
 
@@ -2219,7 +2198,8 @@ if cuda_supported:
                     centroids, usage, [0], [1], torch.float8_e4m3fn, 1e-4))
             self.assertEqual(kernel.__getitem__.return_value.call_count, 1)
 
-    @unittest.skipUnless(INT8_CUDA and torch.cuda.get_device_capability() == (9, 0),
+    @unittest.skipUnless(TRITON_NVIDIA and INT8_CUDA
+                         and torch.cuda.get_device_capability() == (9, 0),
                          'INT8 descriptor execution requires SM90')
     def test_int8_descriptor_requires_api_before_staging(self):
         from faiss.contrib.e_means import triton_assignment as backend
