@@ -2345,6 +2345,37 @@ if cuda_supported:
                     self.assertEqual(torch.cuda.current_device(), current)
 
     @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
+    def test_deterministic_mode_training_is_bit_identical(self):
+        # Whole training runs, not only one batch of statistics: with
+        # torch.use_deterministic_algorithms(True), two runs with the same
+        # seed and data must give bit-identical centroids and labels.
+        generator = torch.Generator().manual_seed(11)
+        n, d, k = 40_000, 32, 32
+        means = torch.randn(k, d, generator=generator) * 4
+        rows = means[torch.randint(k, (n,), generator=generator)]
+        rows = (rows + torch.randn(n, d, generator=generator)).cuda()
+        cases = [(QuantizedEmeans, torch.float32, backend, {"quantizer": None})
+                 for backend in self._floating_backends()]
+        cases += [(Emeans, dtype, "triton", {}) for dtype in (torch.float16, torch.bfloat16)]
+        previous = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            for model_class, dtype, backend, options in cases:
+                with self.subTest(model=model_class.__name__, dtype=dtype, backend=backend):
+                    x = rows.to(dtype)
+                    runs = []
+                    for _ in range(2):
+                        model = model_class(d, k, nepochs=3, seed=5, capture_assignments=True,
+                                            assignment_backend=backend, **options)
+                        centroids, labels = model.train(x)
+                        runs.append((centroids.clone(), labels.clone()))
+                    torch.testing.assert_close(runs[0][0], runs[1][0], rtol=0, atol=0)
+                    torch.testing.assert_close(runs[0][1], runs[1][1], rtol=0, atol=0)
+        finally:
+            torch.use_deterministic_algorithms(previous, warn_only=warn_only)
+
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_exact_half_lattice_statistics(self):
         # Every partial sum is representable: per-slot absolute 2**-24
         # lattice units are 2**23 and 8, both <=2**24, in any atomic order.
