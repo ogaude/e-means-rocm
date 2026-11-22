@@ -15,6 +15,8 @@ __all__ = [
     "DistributedNumpyEmeans",
     "EmeansShardedCentroids",
     "EmeansShardedCentroidsIVF",
+    "supported",
+    "memory_estimate",
 ]
 
 
@@ -43,4 +45,8 @@ def __getattr__(name):
         from .sharded_centroids_ivf import EmeansShardedCentroidsIVF
 
         return EmeansShardedCentroidsIVF
+    if name in ("supported", "memory_estimate"):
+        from . import capabilities
+
+        return getattr(capabilities, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

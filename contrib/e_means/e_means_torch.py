@@ -72,6 +72,22 @@ def _synchronize(device):
         torch.cuda.synchronize(device)
 
 
+def _require_finite(x, name):
+    """Raise ValueError unless every value of x is finite (one synchronization)."""
+    if not (x.is_floating_point() or x.is_complex()) or x.numel() == 0:
+        return
+    flat = x.detach().reshape(len(x), -1) if x.dim() else x.detach().reshape(1, 1)
+    step = max(1, 2**24 // max(1, flat.shape[1]))
+    finite = torch.ones((), dtype=torch.bool, device=x.device)
+    for begin in range(0, len(flat), step):
+        rows = flat[begin:begin + step]
+        if rows.element_size() == 1:
+            rows = rows.to(torch.float16)  # FP8 has no isfinite kernel everywhere
+        finite &= torch.isfinite(rows).all()
+    if not bool(finite):
+        raise ValueError("%s contains NaN or infinite values" % name)
+
+
 class Emeans(_EmeansBase):
     """Floating tensors: CPU FP32 computation or CUDA FP32/FP16/BF16 operands.
 
@@ -118,6 +134,11 @@ class Emeans(_EmeansBase):
     ``train`` uses a random subset of that many rows (drawn from ``seed``) and
     returns label -1 for the other rows. The default None trains on all rows.
 
+    ``check_finite=True`` makes ``train`` (on its input and initial centroids) and
+    ``accumulate`` raise ValueError on NaN or infinite values, which otherwise
+    silently break centroids on the GPU. It costs one pass over the data and one
+    device synchronization per call. INT8/UINT8 rows are always finite.
+
     Model coordinates and results are FP32. CUDA FP32 input defaults to BF16
     assignment and rounded-row statistics; CPU and native FP16/BF16 stay native.
     The first typed input, including empty input, selects the representation,
@@ -146,6 +167,7 @@ class Emeans(_EmeansBase):
         spherical=False,
         unused_threshold=None,
         max_points_per_centroid=None,
+        check_finite=False,
     ):
         self.d = int(d)
         self.k = int(k)
@@ -169,6 +191,7 @@ class Emeans(_EmeansBase):
         self.centroid_chunk_size = int(centroid_chunk_size)
         self.capture_assignments = bool(capture_assignments)
         self.spherical = bool(spherical)
+        self.check_finite = bool(check_finite)
         self.assignment_backend = assignment_backend
 
         self.centroids = None
@@ -482,9 +505,12 @@ class Emeans(_EmeansBase):
         Complete totals borrow workspace. Objective uses FP64; sums/counts
         follow the implementation's statistics dtype. CUDA rows must fit
         the representation. Preparation detaches and makes rows contiguous;
-        CPU rows are converted to FP32. No value validation is performed.
+        CPU rows are converted to FP32. Values are validated only with
+        ``check_finite=True``.
         """
         self._require_running()
+        if self.check_finite:
+            _require_finite(x, "x")
         x = self._prepare_input(x)
         return self._accumulate(x.detach())
 
@@ -833,6 +859,10 @@ class Emeans(_EmeansBase):
         Return centroids and last-pass labels for every row of x (None with
         capture disabled); rows left out of the subset get label -1.
         """
+        if self.check_finite:
+            _require_finite(x, "x")
+            if init_centroids is not None:
+                _require_finite(init_centroids, "init_centroids")
         keep = self._training_subset(len(x))
         if keep is None:
             return self._train_rows(x, init_centroids)

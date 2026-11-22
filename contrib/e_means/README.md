@@ -202,6 +202,7 @@ em = Emeans(64, 1024, nepochs=5, seed=0)   # d and k, then any of the settings b
 | `centroid_chunk_size` | `4096` | Centroids searched at once, PyTorch kernels only |
 | `capture_assignments` | `True` | Keeps each vector's label from the last pass (8 bytes per vector) |
 | `spherical` | `False` | Keeps the centroids on the unit sphere, for cosine similarity |
+| `check_finite` | `False` | Makes `train` and `accumulate` raise `ValueError` on NaN or infinite input (one pass over the data and one GPU synchronization per call) |
 
 Results are what you read from the model once it is trained.
 
@@ -250,8 +251,7 @@ import numpy as np, torch
 from faiss.contrib.e_means import Emeans
 
 xg = torch.from_numpy(x).cuda()        # your float32 NumPy array, copied to the GPU once
-assert torch.isfinite(xg).all()        # the GPU path does not check for NaN or infinity
-em = Emeans(64, 1024, nepochs=5)
+em = Emeans(64, 1024, nepochs=5, check_finite=True)   # raise on NaN or infinity
 centroids, labels = em.train(xg)       # both come back on the GPU
 print(em.recipe["assignment_backend"], em.recipe["batch_size"])   # kernels used, batch size
 ```
@@ -259,9 +259,35 @@ print(em.recipe["assignment_backend"], em.recipe["batch_size"])   # kernels used
 Two things to know:
 
 - **The data must already be on the GPU.** A NumPy array or a CPU tensor trains on the CPU instead.
-- **GPU data is not checked for NaN or infinity.** One bad value does not stop training and can go
-  unnoticed. In our tests, one infinite coordinate left a few broken centroids while the reported
-  loss looked normal. Check your data first: `assert torch.isfinite(xg).all()`.
+- **GPU data is checked for NaN or infinity only with `check_finite=True`.** Without it, one bad
+  value does not stop training and can go unnoticed. In our tests, one infinite coordinate left a
+  few broken centroids while the reported loss looked normal.
+
+**Before training: will it run, and will it fit?** `supported` returns the kernels training
+would use for a data type on a device (`"native"`, `"triton"` or `"cute"`), or `None` when
+training would be refused, without running anything. `memory_estimate` returns an upper bound in
+bytes on the GPU memory `train` needs for an untrained model, so you can pick `train` or the batch
+loop below up front.
+
+```python
+from faiss.contrib.e_means import supported, memory_estimate
+
+supported("cuda", torch.bfloat16)                    # "triton" on an RX 9000 or A100
+supported("cuda", torch.float8_e4m3fn, spherical=True)   # None: spherical needs FP32/FP16/BF16
+em = Emeans(64, 1024)
+if memory_estimate(em, len(x), torch.float32, "cuda") < torch.cuda.mem_get_info()[0]:
+    centroids, labels = em.train(torch.from_numpy(x).cuda())
+```
+
+- `supported` takes the data type the search sees: for `Emeans`, FP32 on a GPU is converted to
+  BF16 by default, so ask for `torch.bfloat16`; raw INT8/UINT8 codes are trained with
+  `QuantizedEmeans`. It checks the GPU and the installed software as training does, but does not
+  compile a kernel.
+- `memory_estimate` covers `Emeans` and `QuantizedEmeans(quantizer=None)` on one GPU, includes the
+  data itself (`include_input=False` leaves it out) and BLAS workspaces measured on ROCm, and adds
+  a 25% margin. On an RX 9060 XT it was 1.07× to 1.33× the measured peak (20,000 × 32 to
+  1M × 128 vectors, 64 to 16,384 centroids). Quantizers and `max_points_per_centroid` are not
+  covered.
 
 
 ### Data too big for memory

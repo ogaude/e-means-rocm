@@ -4,7 +4,7 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.1 released (tag `e-means-rocm-v0.2.1`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
+> **Status: v0.2.2 released (tag `e-means-rocm-v0.2.2`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.1× to 9.3× faster than
@@ -177,6 +177,7 @@ refused, but upstream's NVIDIA inline assembly does not run correctly on AMD. Mo
 | INT8 (v0.2) | INT8/UINT8 assignment on the four families' integer matrix instructions, with a per-family pipeline depth that fits in 64 KiB of LDS (upstream's three stages need up to 112 KiB outside gfx942). |
 | FP8 (v0.2) | FP8 (E4M3) assignment on the families with a native E4M3 matrix instruction, gfx950 and gfx120x. The scaled split's NVIDIA-only `libdevice.ldexp` is replaced on AMD by an exact power-of-two multiply (bit-identical to `torch.ldexp`). gfx942 and gfx11xx refuse FP8 with an error. |
 | Tuning | Per-family settings in `triton_assignment.py`, tuned on RDNA4: `_AMD_DIRECT_CONFIGS` (FP32, FP16/BF16, FP8), `_AMD_INT8_CONFIGS` with `_AMD_INT8_SMALL_CONFIGS` (batches up to 4,096 rows; 2,048 at d = 256), and `_AMD_SPLIT_K_MAX_ROW_BLOCKS`. gfx950 gets a cap to fit 64 KiB of LDS (`_AMD_DIRECT_CONFIGS["cdna4"]`, `_AMD_SPLIT_K_STAGES`). Other families keep the NVIDIA-fitted settings; `_direct_config` is the one place the launcher's choice is made. Gains are under Results. |
+| Pre-flight checks (v0.2.2) | New `capabilities.py`: `supported(device, dtype, ...)` names the backend training would use, or `None`; `memory_estimate(model, n, dtype, device)` bounds the GPU memory of `train`. New `check_finite=True` on `Emeans`/`QuantizedEmeans` raises on NaN or infinite input. Upstream has none of these. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs); `EMEANS_ROCM_GRAPH_REPLAY=1` opts in to replay. |
 | Tests | Vendor-aware skips replace the ROCm skips; INT8 and FP8 tests run on AMD. New GPU-free tests: no inline assembly and `.rn` arithmetic (four AMD targets plus sm90), NVIDIA-only features fenced off, LDS fit of every launch configuration on four AMD targets, pinned launch configurations (NVIDIA unchanged), rule boundaries. New GPU tests: bit-level checks against PyTorch, the FP8 encodes included. One upstream IVF test made robust to OpenBLAS builds. |
 
@@ -272,7 +273,7 @@ tuning sequence on a fresh cloud GPU; see their READMEs.
 | Version | Scope | Hardware | Status |
 |---|---|---|---|
 | **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
-| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day; v0.2.2 (pre-flight checks) 2026-11-22 |
 | v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready |
 | v0.4 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.3's measurement calls for it | RX 9060 XT and MI300X | planned |
 | v0.5 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
@@ -290,6 +291,15 @@ could be released without waiting for cloud access, and the later versions moved
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.2 (2026-11-22, tag `e-means-rocm-v0.2.2`)**: checks a caller can run before training,
+asked for by an integration that had to probe with a tiny training run. `supported(device,
+dtype, ...)` names the backend training would use, or `None` when it would be refused, from
+device facts and installed software (it matched real training in all 96 format × mode ×
+backend cases on gfx1200 and the CPU). `memory_estimate(model, n, dtype, device)` bounds the GPU
+memory of `train` (1.07× to 1.33× the measured peak on gfx1200, never below). `check_finite=True`
+on `Emeans`/`QuantizedEmeans` raises on NaN or infinite input. New test that deterministic mode
+gives bit-identical training runs. 284 tests passed eager, 288 with graph replay, none failing.
 
 **v0.2.1 (2026-11-20, tag `e-means-rocm-v0.2.1`)**: fixes from an independent review. gfx950
 (MI350) capped to fit 64 KiB of LDS (its BF16/FP16 128-row tile and two-stage split-K needed

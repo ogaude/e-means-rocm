@@ -510,6 +510,7 @@ assert 'torch' not in sys.modules
 assert set(package.__all__) == {
     'Emeans', 'NumpyEmeans', 'QuantizedEmeans', 'DistributedNumpyEmeans',
     'DistributedEmeans', 'EmeansShardedCentroids', 'EmeansShardedCentroidsIVF',
+    'supported', 'memory_estimate',
 }
 assert not any(hasattr(package, name) for name in
                ('TorchEmeans', 'QuantizedTorchEmeans', 'NumPyEmeans', 'DistributedNumPyEmeans'))
