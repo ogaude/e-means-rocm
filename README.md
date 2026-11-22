@@ -4,7 +4,7 @@ AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch 
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.2 released (tag `e-means-rocm-v0.2.2`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
+> **Status: v0.2.3 released (tag `e-means-rocm-v0.2.3`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.1× to 9.3× faster than
@@ -273,7 +273,7 @@ tuning sequence on a fresh cloud GPU; see their READMEs.
 | Version | Scope | Hardware | Status |
 |---|---|---|---|
 | **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
-| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day; v0.2.2 (pre-flight checks) 2026-11-22 |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day; v0.2.2 (pre-flight checks) and v0.2.3 (clearer INT8 error) 2026-11-22 |
 | v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready |
 | v0.4 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.3's measurement calls for it | RX 9060 XT and MI300X | planned |
 | v0.5 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
@@ -291,6 +291,11 @@ could be released without waiting for cloud access, and the later versions moved
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.3 (2026-11-22, tag `e-means-rocm-v0.2.3`)**: `Emeans` refuses INT8/UINT8 rows on the GPU at
+the first `train`, `accumulate` or `assign` call, naming `QuantizedEmeans`, instead of failing
+inside the Triton launcher with a dtype-mismatch error. `QuantizedEmeans` and the CPU path are
+unchanged. 285 tests passed eager, 289 with graph replay, none failing.
 
 **v0.2.2 (2026-11-22, tag `e-means-rocm-v0.2.2`)**: checks a caller can run before training,
 asked for by an integration that had to probe with a tiny training run. `supported(device,
