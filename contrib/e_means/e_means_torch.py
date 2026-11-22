@@ -316,8 +316,17 @@ class Emeans(_EmeansBase):
         self._input_dtype = dtype
         self._cast_dtype = dtype if cast else None
 
+    # QuantizedEmeans assigns raw INT8/UINT8 codes; Emeans only floating rows.
+    _accepts_byte_codes = False
+
     def _resolve_input_dtype(self, x):
         if self._input_dtype is None:
+            if (x.device.type != "cpu" and x.dtype in (torch.int8, torch.uint8)
+                    and not self._accepts_byte_codes):
+                raise TypeError(
+                    "Emeans takes floating rows on the GPU; train INT8/UINT8 codes with "
+                    "QuantizedEmeans(d, k, quantizer=None), or with the Int8Quantizer "
+                    "that made them")
             dtype = torch.float32 if x.device.type == "cpu" else x.dtype
             cast = (self._automatic and x.device.type == "cuda" and x.dtype == torch.float32
                     and _default_cast_supported(x.device, self.assignment_backend))

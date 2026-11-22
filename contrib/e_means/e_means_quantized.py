@@ -129,6 +129,8 @@ class QuantizedEmeans(Emeans):
             self._select_statistics_dtype(torch.int64)
         return result
 
+    _accepts_byte_codes = True
+
     def _resolve_input_dtype(self, x):
         if self._input_dtype is None and not self._automatic and self.quantizer is not None:
             self._bind_input_dtype(self.quantizer.dtype)

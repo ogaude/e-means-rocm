@@ -2344,6 +2344,27 @@ if cuda_supported:
                     self.assertEqual((distance.device, labels.device), (device, device))
                     self.assertEqual(torch.cuda.current_device(), current)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "GPU required")
+    def test_emeans_refuses_byte_codes_on_gpu_up_front(self):
+        # Raw INT8/UINT8 codes belong to QuantizedEmeans; Emeans used to fail
+        # deep in the Triton launcher with a dtype-mismatch TypeError.
+        for dtype in (torch.int8, torch.uint8):
+            rows = torch.zeros(64, 8, dtype=dtype, device="cuda")
+            for call in ("train", "accumulate", "assign"):
+                with self.subTest(dtype=dtype, call=call):
+                    model = Emeans(8, 4, nepochs=1)
+                    with self.assertRaisesRegex(TypeError, "QuantizedEmeans"):
+                        if call == "train":
+                            model.train(rows)
+                        elif call == "accumulate":
+                            model.begin(64, torch.zeros(4, 8, device="cuda"))
+                            model.accumulate(rows)
+                        else:
+                            model.train(torch.zeros(64, 8, device="cuda"))
+                            model.assign(rows)
+            # The CPU path converts every input to FP32, as before.
+            Emeans(8, 4, nepochs=1).train(rows.cpu())
+
     @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_deterministic_mode_training_is_bit_identical(self):
         # Whole training runs, not only one batch of statistics: with
