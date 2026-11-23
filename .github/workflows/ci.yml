@@ -1,0 +1,92 @@
+# Fast checks on every push and pull request, on GitHub's CPU runners (no GPU, no Triton).
+#
+# tests:   the GPU-free suite with a CPU-only torch, on every supported Python, in the
+#          development layout (faiss.contrib.e_means replaced by a symlink to this checkout).
+#          Without Triton the compile checks skip; ci-rocm-stack.yml runs them.
+# package: build the wheel and sdist, check their contents, check the package without
+#          torch, then run the suite against the installed package (tools/pkg_alias.py).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TORCH_CPU_INDEX: https://download.pytorch.org/whl/cpu
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+      - name: Install CPU torch, faiss-cpu, numpy, pytest
+        run: |
+          uv venv .venv --python "${{ matrix.python }}"
+          uv pip install --python .venv --index-url "$TORCH_CPU_INDEX" torch
+          uv pip install --python .venv faiss-cpu numpy pytest
+      - name: Point faiss.contrib.e_means at this checkout
+        run: |
+          C=$(.venv/bin/python -c "import faiss.contrib, os; print(os.path.dirname(faiss.contrib.__file__))")
+          mv "$C/e_means" "$C/e_means.pypi-orig"
+          ln -s "$PWD/contrib/e_means" "$C/e_means"
+          .venv/bin/python -c "import os, faiss.contrib.e_means as m; print(os.path.realpath(m.__file__))"
+      - name: GPU-free tests
+        working-directory: tests
+        run: ../.venv/bin/python -m pytest -q -rfE $(ls *e_means*.py | grep -v -e utils -e conditions)
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+      - name: Build
+        run: uv build -o dist .
+      - name: Check contents
+        run: python tools/check_dist.py dist
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+      - name: The package without torch
+        run: |
+          uv venv /tmp/no-torch --python 3.13
+          uv pip install --python /tmp/no-torch dist/*.whl
+          cd /tmp && /tmp/no-torch/bin/python - <<'EOF'
+          import sys
+          import numpy as np
+          from emeans_rocm import NumpyEmeans, memory_estimate, supported
+          assert supported("cuda", "bfloat16", explain=True) == (None, "torch is not installed")
+          assert memory_estimate(NumpyEmeans(8, 4), 100, "float32", "cpu") == 0
+          x = np.random.default_rng(0).standard_normal((2000, 8)).astype("float32")
+          centroids, _ = NumpyEmeans(8, 4, nepochs=1).train(x)
+          assert centroids.shape == (4, 8) and np.isfinite(centroids).all()
+          assert "torch" not in sys.modules
+          print("ok without torch")
+          EOF
+      - name: Tests against the installed package
+        run: |
+          uv venv /tmp/pkg --python 3.13
+          uv pip install --python /tmp/pkg --index-url "$TORCH_CPU_INDEX" torch
+          uv pip install --python /tmp/pkg dist/*.whl pytest
+          cd tests && PYTHONPATH=../tools /tmp/pkg/bin/python -m pytest -q -rfE -p pkg_alias \
+            $(ls *e_means*.py | grep -v -e utils -e conditions)

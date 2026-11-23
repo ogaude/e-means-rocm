@@ -52,6 +52,8 @@ class TmaFenceTest(unittest.TestCase):
         self.assertIsNone(kwargs.get("x_desc"))
 
 
+@unittest.skipUnless(torch.version.cuda or torch.version.hip,
+                     "CPU-only torch build: no GPU device properties")
 class DevicePropertyFieldsTest(unittest.TestCase):
 
     def test_fields_used_by_the_triton_backend_exist(self):

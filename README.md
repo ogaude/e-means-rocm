@@ -215,6 +215,12 @@ Supported data per GPU and the converters are in the kernel table of the
   64 KiB the device profile assumes until MI350's limit is measured. So gfx950 uses 64-row tiles
   and one split-K stage. **To test on an MI350:** read its LDS limit (`tools/device_facts.py`),
   and if it is larger, raise `lds_bytes` for cdna4, drop the cap and time both.
+- **The 64 KiB LDS fit is checked with AMD's ROCm Triton build only.** Compiled with upstream
+  Triton from PyPI (3.8.0 and 3.9.0, on 2026-11-23), several launch configurations need 72 or
+  96 KiB: gfx950 FP32 at every d, gfx1100 BF16 at d >= 192, and the BF16 split-K kernel on
+  gfx1100 and gfx1200. AMD's build (`3.8.0+git669b31ac.rocm10.1.0`) fits them all. A ROCm torch
+  that brings an upstream-based Triton (such as PyTorch's own ROCm wheels) is untested and may
+  fail to launch these kernels.
 - **FP8 runs only where E4M3 is native** (gfx120x, gfx950). MI300 and RX 7000 refuse it;
   emulated FP8 there is a possible v0.4 item.
 - **NVIDIA has not been re-run on hardware.** "NVIDIA results unchanged" rests on mocked-device
@@ -293,7 +299,19 @@ python tools/tune_split_k.py                           # direct vs split-K on sm
 
 Sweep times are for gfx1200. `tools/rocm_probe/` holds the offline compile probes (no GPU
 needed) used to verify the kernel rewrite; `tools/gpu_session/` runs the whole validation and
-tuning sequence on a fresh cloud GPU; see their READMEs.
+tuning sequence on a fresh cloud GPU; see their READMEs. `python tools/check_dist.py dist/`
+checks a built wheel and sdist before release (package files, nothing local, version).
+
+### Continuous integration
+
+GitHub Actions has no GPU, so CI runs the GPU-free part of the suite; GPU runs stay local.
+
+- `ci.yml`, on every push to `main` and every pull request: the GPU-free tests with a CPU-only
+  torch on Python 3.10 to 3.14 (Triton compile checks skip), and the package job: build,
+  `tools/check_dist.py`, `twine check`, the package without torch, and the tests against the
+  installed package.
+- `ci-rocm-stack.yml`, weekly and on demand: the GPU-free tests on AMD's ROCm torch and Triton
+  (about 6.6 GB installed), which adds the Triton compile checks for the four AMD targets.
 
 ## Roadmap
 
@@ -431,6 +449,8 @@ tools/tune_split_k.py direct vs split-K assignment on small row grids
 tools/gemm_gate.py    Triton BF16 assignment vs a bare BLAS GEMM (hand-written backend gate)
 tools/device_facts.py GPU and stack facts as JSON
 tools/pkg_alias.py    pytest plugin: run tests/ against the installed emeans_rocm package
+tools/check_dist.py   checks a built wheel and sdist before release
+.github/workflows/    CI: GPU-free tests and package checks (see Continuous integration)
 tools/gpu_session/    setup + one-shot session runner for a cloud GPU VM (see its README)
 ```
 

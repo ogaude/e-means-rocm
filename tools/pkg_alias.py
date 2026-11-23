@@ -8,17 +8,25 @@ patches the code the package runs. From the repository root, with the package in
     cd tests
     PYTHONPATH=../tools python -m pytest -q -p pkg_alias $(ls *e_means*.py | grep -v -e utils -e conditions)
 
+Child interpreters (``torch.multiprocessing.spawn`` in the distributed tests, ``subprocess``)
+get the same alias: the plugin puts a ``sitecustomize.py`` that imports it on ``PYTHONPATH``.
+This shadows any other ``sitecustomize`` module for the test run.
+
 Three tests start a separate interpreter and add the module's folder to
 ``faiss.contrib.__path__``. They check the faiss layout itself, which this plugin does not
 reach, so they are skipped here and still run in the normal (symlinked) setup.
 """
 
+import atexit
 import importlib
 import importlib.abc
 import importlib.metadata
 import importlib.util
 import os
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -59,6 +67,17 @@ class _Alias(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 if any(n == OLD or n.startswith(OLD + ".") for n in sys.modules):
     raise RuntimeError(f"{OLD} was imported before the pkg_alias plugin loaded")
 sys.meta_path.insert(0, _Alias())
+
+# Child interpreters inherit the environment: a sitecustomize there imports this module first.
+if "PKG_ALIAS_SITE" not in os.environ:
+    _site = tempfile.mkdtemp(prefix="pkg_alias_")
+    Path(_site, "sitecustomize.py").write_text(
+        "import sys\nsys.path.insert(0, %r)\nimport pkg_alias  # noqa: F401\n"
+        % str(Path(__file__).resolve().parent))
+    os.environ["PKG_ALIAS_SITE"] = _site
+    atexit.register(shutil.rmtree, _site, True)
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        p for p in (_site, os.environ.get("PYTHONPATH")) if p)
 
 
 def pytest_report_header(config):

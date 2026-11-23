@@ -1,0 +1,55 @@
+# The GPU-free suite on AMD's ROCm build of torch and Triton, on a CPU runner (no GPU).
+#
+# Adds what ci.yml cannot run: the Triton compile checks for the four AMD targets (no inline
+# assembly, LDS fit of every launch configuration, INT8 compile). They need AMD's ROCm
+# Triton build: upstream Triton from PyPI lays several AMD configurations out above 64 KiB.
+# The stack installs to about 6.6 GB, so this runs weekly and on demand, not on every push.
+name: CI (ROCm stack)
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"  # Mondays 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AMD_INDEX: https://stable.repo.amd.com/rocm/whl-next/
+  TORCH_SPEC: torch[device-gfx1200]==2.14.0+rocm10.1.0  # the recorded development stack (README)
+
+jobs:
+  gpu-free-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space for the ROCm wheels
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+        with:
+          enable-cache: false
+      - name: Install the ROCm torch and Triton, faiss-cpu, numpy, pytest
+        env:
+          UV_NO_CACHE: "1"
+        run: |
+          uv venv .venv --python 3.14
+          uv pip install --python .venv --index-url "$AMD_INDEX" "$TORCH_SPEC"
+          uv pip install --python .venv faiss-cpu numpy pytest
+          .venv/bin/python -c "import torch, triton; print('torch', torch.__version__, 'hip', torch.version.hip, '| triton', triton.__version__)"
+          df -h /
+      - name: Point faiss.contrib.e_means at this checkout
+        run: |
+          C=$(.venv/bin/python -c "import faiss.contrib, os; print(os.path.dirname(faiss.contrib.__file__))")
+          mv "$C/e_means" "$C/e_means.pypi-orig"
+          ln -s "$PWD/contrib/e_means" "$C/e_means"
+      - name: GPU-free tests
+        working-directory: tests
+        env:
+          ROCR_VISIBLE_DEVICES: ""
+        run: ../.venv/bin/python -m pytest -q -rfE $(ls *e_means*.py | grep -v -e utils -e conditions)
