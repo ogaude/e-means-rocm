@@ -4,9 +4,10 @@ AMD GPU (ROCm) support for [e-means](https://github.com/ogaude/e-means-rocm/blob
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.3 released (tag `e-means-rocm-v0.2.3`) for RX 9000 (gfx1200). MI300X follows in v0.3.**
+> **Status: v0.2.4 released (tag `e-means-rocm-v0.2.4`) for RX 9000 (gfx1200), installable with
+> `pip install emeans-rocm`. MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
-> data format trains (FP32, FP16, BF16, INT8/UINT8, FP8), the whole e-means test suite passes,
+> data format trains (FP32, FP16, BF16; INT8/UINT8 and FP8 through `QuantizedEmeans`), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.1× to 9.3× faster than
 > PyTorch for BF16, and tuned INT8 and FP8 train 1.02× to 1.37× faster than BF16. MI300X
 > (gfx942) is planned for v0.3; MI350 (gfx950) and RX 7000 (gfx11xx) are compile-checked only.
@@ -14,20 +15,22 @@ fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 ## Quick start
 
-Install a ROCm build of PyTorch and Triton in a fresh virtual environment, then this
-repository as the package `emeans-rocm`. For an RX 9000 card (gfx1200) on ROCm 10.1:
+Install a ROCm build of PyTorch and Triton in a fresh virtual environment, then the package
+`emeans-rocm` from PyPI. For an RX 9000 card (gfx1200) on ROCm 10.1:
 
 ```bash
 python3 -m venv ~/venvs/emeans-rocm && source ~/venvs/emeans-rocm/bin/activate
 python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ \
   "torch[device-gfx1200]==2.14.0+rocm10.1.0"     # brings triton 3.8.0+rocm10.1.0
-python -m pip install "emeans-rocm @ git+https://github.com/ogaude/e-means-rocm"
+python -m pip install emeans-rocm
 ```
 
 The wheel extra is named after the GPU target (`device-gfx1200` here; `rocminfo` shows yours).
 Install torch first: the package does not list it as a dependency, because pip would then
-install the CUDA build from PyPI. The package pulls in `faiss-cpu` and `numpy`; from a clone,
-`python -m pip install .` does the same. It is not on PyPI.
+install the CUDA build from PyPI. The package pulls in `faiss-cpu` and `numpy` (in a conda
+environment with `faiss-gpu`, install it with `--no-deps` to keep pip's faiss-cpu out). For the code on
+`main` instead of the last release, use `python -m pip install "emeans-rocm @
+git+https://github.com/ogaude/e-means-rocm"`, or `python -m pip install .` from a clone.
 
 The package's import name is `emeans_rocm`. It holds the same code as `contrib/e_means` and
 sits next to the installed faiss, whose own `faiss.contrib.e_means` (upstream's, older copy)
@@ -295,16 +298,43 @@ tuning sequence on a fresh cloud GPU; see their READMEs.
 
 ## Roadmap
 
+The work runs on two tracks. The **GPU track** adds and tunes hardware; each of its versions
+needs the hardware it names. The **integration track** ships what callers of the library need,
+as patch releases of the current version, and needs no new hardware. Since v0.2.1 only the
+integration track has moved: v0.3 is waiting for MI300X access.
+
+**GPU track**
+
 | Version | Scope | Hardware | Status |
 |---|---|---|---|
 | **v0.1** | Triton as the default AMD path for FP32, FP16 and BF16; validated and tuned on RDNA4 | RX 9060 XT | **released** 2026-11-19 |
-| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 the same day; v0.2.2 (pre-flight checks) and v0.2.3 (clearer INT8 error) 2026-11-22 |
-| v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready |
+| **v0.2** | INT8 on all four families; native FP8 on gfx120x and gfx950; RDNA4 tuning for both, small-batch settings and the split-K choice; the cloud session tooling | RX 9060 XT | **released** 2026-11-20; v0.2.1 (review fixes) the same day |
+| v0.3 | MI300X (gfx942) validation and tuning; measure whether a hand-written AMD kernel (the CuTe counterpart) is worth building | MI300X (cloud) | planned; scripts ready; **waiting for cloud access** |
 | v0.4 | Optionally emulated FP8 on gfx942 and gfx11xx; the hand-written kernel if v0.3's measurement calls for it | RX 9060 XT and MI300X | planned |
 | v0.5 | Several GPUs (`DistributedEmeans`, sharded centroids) | 8× MI300X (cloud) | planned |
 
 The MI300X work was first planned for v0.2; it moved to v0.3 (2026-11-20) so the RX 9000 work
 could be released without waiting for cloud access, and the later versions moved up by one.
+
+**Integration track**
+
+These came from a downstream integration of e-means, which had to work around missing checks
+and the way the fork was installed.
+
+| Release | Scope | Status |
+|---|---|---|
+| **v0.2.2** | Pre-flight checks: `supported()`, `memory_estimate()`, `check_finite=True` | **released** 2026-11-22 |
+| **v0.2.3** | `Emeans` refuses INT8/UINT8 rows on the GPU with an error naming `QuantizedEmeans` | **released** 2026-11-22 |
+| **v0.2.4** | Installable package `emeans-rocm` (import name `emeans_rocm`) on PyPI; users no longer need the symlink into faiss-cpu (development still uses it) | **released** 2026-11-23 |
+
+Not scheduled on either track:
+
+- **Upstream.** Whether faiss would take the ROCm changes into `contrib/e_means` has not been
+  asked yet. The fork keeps faiss's layout so its changes still apply there
+  ([Relation to upstream faiss](https://github.com/ogaude/e-means-rocm#relation-to-upstream-faiss)); if they were merged, the package
+  could shrink or be retired.
+- **NVIDIA hardware run.** NVIDIA paths rest on mocked selection tests and sm90 compiles (see
+  Known limitations); a run needs access to an NVIDIA GPU.
 
 **v0.3 plan (needs an MI300X)**
 
@@ -316,6 +346,15 @@ could be released without waiting for cloud access, and the later versions moved
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.4 (2026-11-23, tag `e-means-rocm-v0.2.4`)**: the fork installs as a package,
+`pip install emeans-rocm`, imported as `emeans_rocm`. Before, using it meant replacing the
+`faiss/contrib/e_means` folder inside an installed faiss-cpu, and a reinstall of faiss-cpu
+through that symlink could delete files in the clone; the development setup still works that way. `pyproject.toml` builds the wheel straight
+from `contrib/e_means`, so the source keeps faiss's layout; `tools/pkg_alias.py` runs the
+unchanged tests against the installed package. No change to the e-means code. 285 tests passed
+eager, 289 with graph replay, none failing; against the package (eager), 282 passed and the 3
+that check the faiss layout were skipped, besides the usual hardware skips.
 
 **v0.2.3 (2026-11-22, tag `e-means-rocm-v0.2.3`)**: `Emeans` refuses INT8/UINT8 rows on the GPU at
 the first `train`, `accumulate` or `assign` call, naming `QuantizedEmeans`, instead of failing
