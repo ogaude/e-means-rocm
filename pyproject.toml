@@ -1,0 +1,47 @@
+# Packages contrib/e_means as the importable distribution "emeans-rocm" (import name
+# emeans_rocm). contrib/e_means keeps faiss's layout so that changes still apply to a faiss
+# checkout; the wheel maps that folder onto emeans_rocm/ at build time. The package code
+# only uses relative imports, so nothing is rewritten.
+#
+# torch is not a dependency on purpose: pip would install the CUDA build from PyPI over a
+# ROCm build. Install the ROCm torch first (README, Quick start); Triton comes with it.
+
+[build-system]
+requires = ["hatchling>=1.27"]  # 1.27: PEP 639 license metadata
+build-backend = "hatchling.build"
+
+[project]
+name = "emeans-rocm"
+version = "0.2.4.dev0"
+description = "E-means mini-batch k-means from faiss contrib, with AMD ROCm GPU support through Triton"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Meta Platforms, Inc. and affiliates" }]
+maintainers = [{ name = "ogaude" }]
+keywords = ["k-means", "clustering", "faiss", "rocm", "amd", "gpu", "triton"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# faiss: the CPU path (NumpyEmeans, imported by the package's __init__) uses faiss.knn.
+dependencies = ["numpy", "faiss-cpu"]
+
+[project.urls]
+Source = "https://github.com/ogaude/e-means-rocm"
+Upstream = "https://github.com/facebookresearch/faiss/tree/main/contrib/e_means"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"contrib/e_means" = "emeans_rocm"
+
+# List the sdist contents explicitly: by default hatchling takes the whole tree minus
+# .gitignore, which would ship files excluded only through .git/info/exclude.
+[tool.hatch.build.targets.sdist]
+only-include = ["contrib/e_means", "LICENSE", "README.md"]

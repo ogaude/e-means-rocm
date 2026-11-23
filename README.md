@@ -14,20 +14,45 @@ fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 ## Quick start
 
-Clone this repository and install a ROCm build of PyTorch and Triton in a fresh virtual
-environment. For an RX 9000 card (gfx1200) on ROCm 10.1:
+Install a ROCm build of PyTorch and Triton in a fresh virtual environment, then this
+repository as the package `emeans-rocm`. For an RX 9000 card (gfx1200) on ROCm 10.1:
 
 ```bash
-git clone https://github.com/ogaude/e-means-rocm && cd e-means-rocm
 python3 -m venv ~/venvs/emeans-rocm && source ~/venvs/emeans-rocm/bin/activate
 python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ \
   "torch[device-gfx1200]==2.14.0+rocm10.1.0"     # brings triton 3.8.0+rocm10.1.0
-python -m pip install faiss-cpu numpy
+python -m pip install "emeans-rocm @ git+https://github.com/ogaude/e-means-rocm"
 ```
 
 The wheel extra is named after the GPU target (`device-gfx1200` here; `rocminfo` shows yours).
-Inside a clone, `tools/gpu_session/setup.sh` does the install and the next step for the
-detected target.
+Install torch first: the package does not list it as a dependency, because pip would then
+install the CUDA build from PyPI. The package pulls in `faiss-cpu` and `numpy`; from a clone,
+`python -m pip install .` does the same. It is not on PyPI.
+
+The package's import name is `emeans_rocm`. It holds the same code as `contrib/e_means` and
+sits next to the installed faiss, whose own `faiss.contrib.e_means` (upstream's, older copy)
+it leaves alone:
+
+```python
+import torch
+from emeans_rocm import Emeans
+
+x = torch.randn(200_000, 64, device="cuda")      # "cuda" also means AMD on ROCm
+em = Emeans(64, 1024)
+centroids, labels = em.train(x)
+print(em.recipe["assignment_backend"])           # expected: "triton" on a supported AMD GPU
+```
+
+INT8 and FP8 data go through `QuantizedEmeans` with an `Int8Quantizer` or `Fp8Quantizer`; see
+the [e-means README](contrib/e_means/README.md#kernels), whose examples import
+`faiss.contrib.e_means` (read `emeans_rocm` with the package).
+
+### Development setup
+
+The tests, benchmarks and tools import `faiss.contrib.e_means`, as upstream's do. To work on
+them, clone the repository (`git clone https://github.com/ogaude/e-means-rocm && cd
+e-means-rocm`), install torch as above and `python -m pip install faiss-cpu numpy`; inside a
+clone, `tools/gpu_session/setup.sh` does the install and the next step for the detected target.
 
 The `faiss-cpu` wheel ships its own, older copy of `faiss/contrib/e_means`, which would shadow
 this repository. From the repository root, replace it with a symlink to the working tree (the
@@ -40,20 +65,9 @@ ln -s "$PWD/contrib/e_means" "$C/e_means"
 python -c "import os, faiss.contrib.e_means as m; print(os.path.realpath(m.__file__))"  # this repo
 ```
 
-Then train:
-
-```python
-import torch
-from faiss.contrib.e_means import Emeans
-
-x = torch.randn(200_000, 64, device="cuda")      # "cuda" also means AMD on ROCm
-em = Emeans(64, 1024)
-centroids, labels = em.train(x)
-print(em.recipe["assignment_backend"])           # expected: "triton" on a supported AMD GPU
-```
-
-INT8 and FP8 data go through `QuantizedEmeans` with an `Int8Quantizer` or `Fp8Quantizer`; see
-the [e-means README](contrib/e_means/README.md#kernels).
+The example above then runs with `from faiss.contrib.e_means import Emeans`. Remove the
+symlink before reinstalling or uninstalling `faiss-cpu`: pip follows it and can delete or
+overwrite files in the clone.
 
 ## Target GPUs
 
@@ -222,7 +236,13 @@ cd tests
 ROCR_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= python -m pytest -q $(ls *e_means*.py | grep -v -e utils -e conditions)
 # Full run on a GPU (add EMEANS_ROCM_GRAPH_REPLAY=1 to include the graph-replay tests):
 python -m pytest -q $(ls *e_means*.py | grep -v -e utils -e conditions)
+# The same tests against the installed emeans_rocm package (no symlink needed):
+PYTHONPATH=../tools python -m pytest -q -p pkg_alias $(ls *e_means*.py | grep -v -e utils -e conditions)
 ```
+
+The first two commands need the development setup (see Quick start). The third uses the
+`tools/pkg_alias.py` plugin, which maps `faiss.contrib.e_means` imports onto `emeans_rocm`; it
+skips the three tests that check the faiss layout itself.
 
 - Hide the GPU with `ROCR_VISIBLE_DEVICES=` (empty). `HIP_VISIBLE_DEVICES=-1` makes ROCm 10.1
   abort at the first `torch.cuda.is_available()`.
@@ -340,6 +360,7 @@ tuning table. Acceptance on gfx1200, as measured then:
 ## Repository layout
 
 ```
+pyproject.toml        builds contrib/e_means as the package emeans-rocm (import name emeans_rocm)
 contrib/e_means/      e-means source (upstream + ROCm changes); its README is the user guide
 benchs/e_means/       upstream benchmarks and demos
 tests/                e-means tests (upstream + new ROCm tests)
@@ -350,6 +371,7 @@ tools/tune_assign.py  assignment-kernel tuning sweep and upstream-vs-table compa
 tools/tune_split_k.py direct vs split-K assignment on small row grids
 tools/gemm_gate.py    Triton BF16 assignment vs a bare BLAS GEMM (hand-written backend gate)
 tools/device_facts.py GPU and stack facts as JSON
+tools/pkg_alias.py    pytest plugin: run tests/ against the installed emeans_rocm package
 tools/gpu_session/    setup + one-shot session runner for a cloud GPU VM (see its README)
 ```
 
@@ -360,8 +382,8 @@ This repository starts from [facebookresearch/faiss](https://github.com/facebook
 unmodified snapshot of `contrib/e_means`, `benchs/e_means` and the e-means tests, so
 `git diff d6e4215 -- contrib benchs tests` shows exactly what this fork changes in faiss's
 files. Those paths mirror faiss, so changes to them apply to a faiss checkout
-(`git format-patch d6e4215 -- contrib benchs tests`, then `git am`); `README.md`, `tools/` and
-`.gitignore` belong to this fork only. To see what upstream changed since the snapshot:
+(`git format-patch d6e4215 -- contrib benchs tests`, then `git am`); `README.md`, `pyproject.toml`,
+`tools/` and `.gitignore` belong to this fork only. To see what upstream changed since the snapshot:
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/facebookresearch/faiss.git /tmp/faiss
