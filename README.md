@@ -4,7 +4,7 @@ AMD GPU (ROCm) support for [e-means](https://github.com/ogaude/e-means-rocm/blob
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.4 released (tag `e-means-rocm-v0.2.4`) for RX 9000 (gfx1200), installable with
+> **Status: v0.2.5 released (tag `e-means-rocm-v0.2.5`) for RX 9000 (gfx1200), installable with
 > `pip install emeans-rocm`. MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16; INT8/UINT8 and FP8 through `QuantizedEmeans`), the whole e-means test suite passes,
@@ -72,10 +72,9 @@ The example above then runs with `from faiss.contrib.e_means import Emeans`. Rem
 symlink before reinstalling or uninstalling `faiss-cpu`: pip follows it and can delete or
 overwrite files in the clone.
 
-Do not use `python -m pip install -e .` for development: the package maps `contrib/e_means`
-onto `emeans_rocm` at build time, and an editable install then gets a plain copy (pip still
-reports it as editable), so later edits in the clone do not reach it. Reinstall with
-`python -m pip install .` after changes, or work through the symlink.
+`python -m pip install -e .` does not work: the package maps `contrib/e_means` onto
+`emeans_rocm` at build time, which an editable install cannot do, so the build stops with an
+error. Reinstall with `python -m pip install .` after changes, or work through the symlink.
 
 ## Target GPUs
 
@@ -326,6 +325,7 @@ and the way the fork was installed.
 | **v0.2.2** | Pre-flight checks: `supported()`, `memory_estimate()`, `check_finite=True` | **released** 2026-11-22 |
 | **v0.2.3** | `Emeans` refuses INT8/UINT8 rows on the GPU with an error naming `QuantizedEmeans` | **released** 2026-11-22 |
 | **v0.2.4** | Installable package `emeans-rocm` (import name `emeans_rocm`) on PyPI; users no longer need the symlink into faiss-cpu (development still uses it) | **released** 2026-11-23 |
+| **v0.2.5** | `supported()` and `memory_estimate()` answer without torch installed; `supported(..., explain=True)` gives the reason; a smaller wheel | **released** 2026-11-23 |
 
 Not scheduled on either track:
 
@@ -346,6 +346,21 @@ Not scheduled on either track:
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.5 (2026-11-23, tag `e-means-rocm-v0.2.5`)**: `supported()` and `memory_estimate()` answer
+without PyTorch installed, for example on a CPU-only machine that only uses `NumpyEmeans`:
+`supported` returns `None`, and `memory_estimate` returns 0 for the CPU and raises a
+`RuntimeError` naming the missing torch for a GPU. Both take dtype names (`"bfloat16"`) and
+device strings. `supported(..., explain=True)` returns `(backend, reason)`, for example
+`(None, "torch is not installed")`. When torch has no GPU, asking about a GPU device raised
+instead of answering: on a CPU-only torch build for every backend ("Torch not compiled with CUDA
+enabled", torch 2.15 CPU), and on ROCm torch with the GPU hidden for an explicit `native` or
+`triton` backend with BF16 ("No CUDA GPUs are available"). It now returns `None` with torch's
+reason, and `memory_estimate` raises a `RuntimeError` saying torch sees no GPU. The wheel leaves out the README figures (734 KB to 160 KB),
+and `pip install -e .` now stops with an error instead of installing a copy. No other change to
+the e-means code. 291 tests passed eager, 295 with graph replay, 232 without a GPU, none failing;
+against the package (eager), 288 passed and the 3 that check the faiss layout were skipped. The
+capabilities tests also passed on a CPU-only torch 2.15 build.
 
 **v0.2.4 (2026-11-23, tag `e-means-rocm-v0.2.4`)**: the fork installs as a package,
 `pip install emeans-rocm`, imported as `emeans_rocm`. Before, using it meant replacing the

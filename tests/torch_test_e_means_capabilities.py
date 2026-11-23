@@ -271,6 +271,12 @@ except RuntimeError as error:
     assert "torch is not installed" in str(error), error
 else:
     raise AssertionError("no error for a GPU without torch")
+try:
+    memory_estimate(model, 1000, "float32", 0)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("device 0 was not taken as a GPU")
 assert "torch" not in sys.modules
 """
 
@@ -333,17 +339,24 @@ class SupportedExplainTest(unittest.TestCase):
                              (None, "CuTe assignment needs an NVIDIA SM90 GPU"))
 
     def test_no_gpu_answers_instead_of_raising(self):
-        # A CPU-only torch build: asking about the GPU must not raise.
-        no_gpu = RuntimeError("No CUDA GPUs are available")
-        with mock.patch.object(torch.version, "hip", None), \
-             mock.patch.object(torch.cuda, "device_count", return_value=0), \
-             mock.patch.object(torch.cuda, "get_device_capability", side_effect=no_gpu):
-            for backend in BACKENDS:
-                for dtype in ALL:
-                    with self.subTest(backend=backend, dtype=dtype):
-                        name, reason = supported("cuda", dtype, backend=backend, explain=True)
-                        self.assertIsNone(name)
-                        self.assertTrue(reason)
+        # Asking about the GPU must not raise when torch has none: a GPU build with no
+        # visible GPU raises RuntimeError, a CPU-only build AssertionError.
+        for error in (RuntimeError("No CUDA GPUs are available"),
+                      AssertionError("Torch not compiled with CUDA enabled")):
+            with mock.patch.object(torch.version, "hip", None), \
+                 mock.patch.object(torch.cuda, "device_count", return_value=0), \
+                 mock.patch.object(torch.cuda, "get_device_capability", side_effect=error):
+                for backend in BACKENDS:
+                    for dtype in ALL:
+                        with self.subTest(error=type(error).__name__, backend=backend,
+                                          dtype=dtype):
+                            name, reason = supported("cuda", dtype, backend=backend,
+                                                     explain=True)
+                            self.assertIsNone(name)
+                            self.assertEqual(reason, str(error))
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "torch sees no GPU"):
+                memory_estimate(Emeans(8, 4), 100, torch.float32, "cuda")
 
     def test_memory_estimate_takes_names(self):
         self.assertEqual(memory_estimate(Emeans(8, 4), 100, "float32", "cpu"), 0)

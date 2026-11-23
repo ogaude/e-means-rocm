@@ -1,8 +1,9 @@
 # Packages contrib/e_means as the importable distribution "emeans-rocm" (import name
 # emeans_rocm). contrib/e_means keeps faiss's layout so that changes still apply to a faiss
-# checkout; the wheel maps that folder onto emeans_rocm/ at build time. The package code
-# only uses relative imports, so nothing is rewritten. That mapping does not survive an
-# editable install: "pip install -e ." gets a plain copy, so use the symlink setup to develop.
+# checkout; the wheel maps that folder onto emeans_rocm/ at build time (`sources`). The
+# package code only uses relative imports, so nothing is rewritten. Editable installs
+# ("pip install -e .") cannot rename a folder and stop with an error; use the symlink setup
+# to develop. The README figures (contrib/e_means/figure) stay out of the wheel and sdist.
 #
 # torch is not a dependency on purpose: pip would install the CUDA build from PyPI over a
 # ROCm build. Install the ROCm torch first (README, Quick start); Triton comes with it.
@@ -13,7 +14,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "emeans-rocm"
-version = "0.2.5.dev0"
+version = "0.2.5"
 description = "E-means mini-batch k-means from faiss contrib, with AMD ROCm GPU support through Triton"
 readme = "README.md"
 license = "MIT"
@@ -37,12 +38,14 @@ Source = "https://github.com/ogaude/e-means-rocm"
 Upstream = "https://github.com/facebookresearch/faiss/tree/main/contrib/e_means"
 
 [tool.hatch.build.targets.wheel]
-bypass-selection = true
+packages = ["contrib/e_means"]
+exclude = ["contrib/e_means/figure"]
 
-[tool.hatch.build.targets.wheel.force-include]
+[tool.hatch.build.targets.wheel.sources]
 "contrib/e_means" = "emeans_rocm"
 
 # List the sdist contents explicitly: by default hatchling takes the whole tree minus
 # .gitignore, which would ship files excluded only through .git/info/exclude.
 [tool.hatch.build.targets.sdist]
 only-include = ["contrib/e_means", "LICENSE", "README.md"]
+exclude = ["contrib/e_means/figure"]

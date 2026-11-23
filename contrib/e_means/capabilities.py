@@ -48,12 +48,15 @@ def _as_dtype(dtype):
 def _device_type(device):
     if torch is not None:
         return torch.device(device).type
+    if isinstance(device, int):  # as torch.device(0): GPU 0
+        return "cuda"
     return str(device).split(":", 1)[0]
 
 
 def _refusal(name, device, dtype, spherical, d):
     """Why an explicit backend cannot run this representation, or None if it can."""
     from .device_profile import (
+        AMD_TARGETS,
         amd_native_reduced_supported,
         amd_triton_supported,
         is_rocm,
@@ -72,7 +75,7 @@ def _refusal(name, device, dtype, spherical, d):
         if is_rocm():
             if amd_native_reduced_supported(device):
                 return None
-            return "native FP16/BF16 is not supported on this AMD GPU"
+            return "native FP16/BF16 on AMD needs a %s GPU and torch.addmm(out_dtype=)" % AMD_TARGETS
         if capability >= (8, 0) and "out_dtype" in (torch.addmm.__doc__ or ""):
             return None
         return "native FP16/BF16 needs an NVIDIA SM80 or later GPU and torch.addmm(out_dtype=)"
@@ -81,7 +84,7 @@ def _refusal(name, device, dtype, spherical, d):
     if name == "triton":
         if is_rocm():
             if not amd_triton_supported(device):
-                return "Triton assignment is not supported on this AMD GPU"
+                return "Triton assignment on AMD needs a %s GPU and Triton installed" % AMD_TARGETS
         elif capability < (8, 0):
             return "Triton assignment needs an NVIDIA SM80 or later GPU"
         try:
@@ -126,12 +129,15 @@ def _supported(device, dtype, spherical, backend, d, k):
             try:
                 name = select_backend(SimpleNamespace(device=device), representation,
                                       k or 1, d or 1, "auto").name
-            except (RuntimeError, ValueError, ImportError) as error:
+            except (RuntimeError, ValueError, ImportError, AssertionError) as error:
                 return None, str(error)
         else:
             name = backend
         reason = _refusal(name, device, representation, spherical, d)
-    except RuntimeError as error:  # no usable GPU, e.g. a CPU-only torch build
+    except (RuntimeError, AssertionError) as error:
+        # No usable GPU: torch raises RuntimeError("No CUDA GPUs are available") on a GPU
+        # build with no visible GPU, AssertionError("Torch not compiled with CUDA
+        # enabled") on a CPU-only build.
         return None, str(error)
     if reason is not None:
         return None, reason
@@ -221,6 +227,8 @@ def memory_estimate(model, n, dtype, device, *, include_input=True):
         raise ValueError("n must be >= 1")
     if getattr(model, "quantizer", None) is not None:
         raise ValueError("memory_estimate covers models without a quantizer")
+    if not torch.cuda.is_available():
+        raise RuntimeError("not supported: torch sees no GPU (a CPU-only build, or none visible)")
     compute = dtype
     automatic = getattr(model, "_automatic", True)
     if dtype is torch.float32 and automatic:
