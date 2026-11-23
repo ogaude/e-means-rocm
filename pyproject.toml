@@ -1,7 +1,8 @@
 # Packages contrib/e_means as the importable distribution "emeans-rocm" (import name
 # emeans_rocm). contrib/e_means keeps faiss's layout so that changes still apply to a faiss
 # checkout; the wheel maps that folder onto emeans_rocm/ at build time. The package code
-# only uses relative imports, so nothing is rewritten.
+# only uses relative imports, so nothing is rewritten. That mapping does not survive an
+# editable install: "pip install -e ." gets a plain copy, so use the symlink setup to develop.
 #
 # torch is not a dependency on purpose: pip would install the CUDA build from PyPI over a
 # ROCm build. Install the ROCm torch first (README, Quick start); Triton comes with it.

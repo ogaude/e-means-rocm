@@ -1,6 +1,6 @@
 # e-means-rocm
 
-AMD GPU (ROCm) support for [e-means](contrib/e_means/README.md), the mini-batch k-means in
+AMD GPU (ROCm) support for [e-means](https://github.com/ogaude/e-means-rocm/blob/main/contrib/e_means/README.md), the mini-batch k-means in
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
@@ -44,7 +44,7 @@ print(em.recipe["assignment_backend"])           # expected: "triton" on a suppo
 ```
 
 INT8 and FP8 data go through `QuantizedEmeans` with an `Int8Quantizer` or `Fp8Quantizer`; see
-the [e-means README](contrib/e_means/README.md#kernels), whose examples import
+the [e-means README](https://github.com/ogaude/e-means-rocm/blob/main/contrib/e_means/README.md#kernels), whose examples import
 `faiss.contrib.e_means` (read `emeans_rocm` with the package).
 
 ### Development setup
@@ -68,6 +68,11 @@ python -c "import os, faiss.contrib.e_means as m; print(os.path.realpath(m.__fil
 The example above then runs with `from faiss.contrib.e_means import Emeans`. Remove the
 symlink before reinstalling or uninstalling `faiss-cpu`: pip follows it and can delete or
 overwrite files in the clone.
+
+Do not use `python -m pip install -e .` for development: the package maps `contrib/e_means`
+onto `emeans_rocm` at build time, and an editable install then gets a plain copy (pip still
+reports it as editable), so later edits in the clone do not reach it. Reinstall with
+`python -m pip install .` after changes, or work through the symlink.
 
 ## Target GPUs
 
@@ -196,7 +201,7 @@ refused, but upstream's NVIDIA inline assembly does not run correctly on AMD. Mo
 | Tests | Vendor-aware skips replace the ROCm skips; INT8 and FP8 tests run on AMD. New GPU-free tests: no inline assembly and `.rn` arithmetic (four AMD targets plus sm90), NVIDIA-only features fenced off, LDS fit of every launch configuration on four AMD targets, pinned launch configurations (NVIDIA unchanged), rule boundaries. New GPU tests: bit-level checks against PyTorch, the FP8 encodes included. One upstream IVF test made robust to OpenBLAS builds. |
 
 Supported data per GPU and the converters are in the kernel table of the
-[e-means README](contrib/e_means/README.md#kernels).
+[e-means README](https://github.com/ogaude/e-means-rocm/blob/main/contrib/e_means/README.md#kernels).
 
 ## Known limitations
 
@@ -394,5 +399,5 @@ diff -r /tmp/snapshot/contrib/e_means /tmp/faiss/contrib/e_means
 
 ## License
 
-MIT, as faiss; see [LICENSE](LICENSE). The e-means code is by Meta Platforms, Inc. and
+MIT, as faiss; see [LICENSE](https://github.com/ogaude/e-means-rocm/blob/main/LICENSE). The e-means code is by Meta Platforms, Inc. and
 affiliates; the ROCm changes in this repository are under the same license.
