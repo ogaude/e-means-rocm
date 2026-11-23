@@ -282,7 +282,14 @@ if memory_estimate(em, len(x), torch.float32, "cuda") < torch.cuda.mem_get_info(
 - `supported` takes the data type the search sees: for `Emeans`, FP32 on a GPU is converted to
   BF16 by default, so ask for `torch.bfloat16`; raw INT8/UINT8 codes are trained with
   `QuantizedEmeans`. It checks the GPU and the installed software as training does, but does not
-  compile a kernel.
+  compile a kernel. `explain=True` returns `(backend, reason)` instead, for example
+  `("triton", None)` or `(None, "spherical training takes FP32, FP16 or BF16 rows")`.
+- Both answer without PyTorch installed, for example on a CPU-only machine that only has
+  `NumpyEmeans`: `supported` returns `None` (reason `"torch is not installed"`), and
+  `memory_estimate` returns 0 for `"cpu"` and raises a `RuntimeError` for a GPU. Data types and
+  devices can then be given as strings: `supported("cuda", "bfloat16", explain=True)`. With a
+  CPU-only torch build, a GPU device gives `None` with torch's reason ("No CUDA GPUs are
+  available").
 - `memory_estimate` covers `Emeans` and `QuantizedEmeans(quantizer=None)` on one GPU, includes the
   data itself (`include_input=False` leaves it out) and BLAS workspaces measured on ROCm, and adds
   a 25% margin. On an RX 9060 XT it was 1.07× to 1.33× the measured peak (20,000 × 32 to

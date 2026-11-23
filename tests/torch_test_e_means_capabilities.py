@@ -1,6 +1,10 @@
 # supported(), memory_estimate() and check_finite. The mocked-device tests need no
 # GPU; the others compare the answers with real training on the local device.
 
+import contextlib
+import os
+import subprocess
+import sys
 import unittest
 import warnings
 from unittest import mock
@@ -8,6 +12,7 @@ from unittest import mock
 import torch
 
 from faiss.contrib.e_means import Emeans, QuantizedEmeans, memory_estimate, supported
+from faiss.contrib.e_means import capabilities
 from faiss.contrib.e_means.torch_backend import CuteBackend, TritonBackend
 from faiss.contrib.e_means.quantizer import CastQuantizer
 from torch_test_e_means_backend_selection import amd, nvidia
@@ -232,6 +237,124 @@ class CheckFiniteTest(unittest.TestCase):
     def test_bytes_are_accepted(self):
         q = QuantizedEmeans(64, 16, nepochs=1, quantizer=None, check_finite=True)
         q.train(_rows(torch.int8, "cuda"))
+
+
+NAMES = ("float32", "float16", "bfloat16", "int8", "uint8", "float8_e4m3fn")
+
+# Runs in a separate interpreter where importing torch fails, as on a CPU-only install.
+WITHOUT_TORCH = r"""
+import importlib, importlib.abc, os, sys
+
+class NoTorch(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "torch" or name.startswith("torch."):
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+sys.meta_path.insert(0, NoTorch())
+package = importlib.import_module(sys.argv[1])
+assert os.path.realpath(package.__file__) == os.path.realpath(sys.argv[2])
+supported, memory_estimate = package.supported, package.memory_estimate
+assert supported("cuda", "bfloat16") is None
+assert supported("cuda:0", "bfloat16", explain=True) == (None, "torch is not installed")
+assert supported("cpu", "float32", explain=True) == (None, "torch is not installed")
+try:
+    supported("cpu", "float32", backend="gpu")
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown backend was accepted")
+model = package.NumpyEmeans(8, 4)
+assert memory_estimate(model, 1000, "float32", "cpu") == 0
+try:
+    memory_estimate(model, 1000, "float32", "cuda:0")
+except RuntimeError as error:
+    assert "torch is not installed" in str(error), error
+else:
+    raise AssertionError("no error for a GPU without torch")
+assert "torch" not in sys.modules
+"""
+
+
+class WithoutTorchTest(unittest.TestCase):
+
+    def test_supported_and_memory_estimate_answer_without_torch(self):
+        # The package under test, by its real import name (faiss.contrib.e_means in a
+        # clone, emeans_rocm for the installed package).
+        name = capabilities.__spec__.parent
+        package = sys.modules[name]
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        result = subprocess.run([sys.executable, "-c", WITHOUT_TORCH, name, package.__file__],
+                                capture_output=True, text=True, env=env, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class SupportedExplainTest(unittest.TestCase):
+
+    def _devices(self):
+        yield "cpu", "cpu", contextlib.nullcontext()
+        for arch in ("gfx942", "gfx1200"):
+            yield arch, "cuda:0", amd(arch)
+        for capability in ((8, 0), (9, 0)):
+            yield "sm%d%d" % capability, "cuda:0", nvidia(capability)
+
+    def test_dtype_names_match_torch_dtypes(self):
+        with _software_present():
+            for label, device, context in self._devices():
+                with context:
+                    for name in NAMES:
+                        for backend in BACKENDS:
+                            for spherical in (False, True):
+                                with self.subTest(device=label, dtype=name, backend=backend,
+                                                  spherical=spherical):
+                                    kwargs = dict(backend=backend, spherical=spherical)
+                                    by_name = supported(device, name, explain=True, **kwargs)
+                                    by_dtype = supported(device, getattr(torch, name),
+                                                         explain=True, **kwargs)
+                                    self.assertEqual(by_name, by_dtype)
+                                    self.assertEqual(supported(device, name, **kwargs),
+                                                     by_name[0])
+                                    self.assertEqual(by_name[0] is None, by_name[1] is not None)
+
+    def test_reasons(self):
+        self.assertEqual(supported("cpu", torch.float32, explain=True), ("native", None))
+        self.assertEqual(supported("cpu", torch.float32, backend="triton", explain=True),
+                         (None, "triton runs only on a GPU"))
+        name, reason = supported("cpu", torch.float64, explain=True)
+        self.assertIsNone(name)
+        self.assertIn("not a representation", reason)
+        self.assertEqual(supported("cpu", "float64"), None)
+        with _software_present(), amd("gfx942"):
+            name, reason = supported("cuda:0", FP8, explain=True)
+            self.assertIsNone(name)
+            self.assertTrue(reason)
+            self.assertEqual(supported("cuda:0", torch.int8, spherical=True, explain=True),
+                             (None, "spherical training takes FP32, FP16 or BF16 rows"))
+            self.assertEqual(supported("cuda:0", torch.bfloat16, backend="cute", explain=True),
+                             (None, "CuTe assignment needs an NVIDIA SM90 GPU"))
+
+    def test_no_gpu_answers_instead_of_raising(self):
+        # A CPU-only torch build: asking about the GPU must not raise.
+        no_gpu = RuntimeError("No CUDA GPUs are available")
+        with mock.patch.object(torch.version, "hip", None), \
+             mock.patch.object(torch.cuda, "device_count", return_value=0), \
+             mock.patch.object(torch.cuda, "get_device_capability", side_effect=no_gpu):
+            for backend in BACKENDS:
+                for dtype in ALL:
+                    with self.subTest(backend=backend, dtype=dtype):
+                        name, reason = supported("cuda", dtype, backend=backend, explain=True)
+                        self.assertIsNone(name)
+                        self.assertTrue(reason)
+
+    def test_memory_estimate_takes_names(self):
+        self.assertEqual(memory_estimate(Emeans(8, 4), 100, "float32", "cpu"), 0)
+
+    @unittest.skipUnless(GPU, "GPU required")
+    def test_memory_estimate_names_match_torch_dtypes(self):
+        model = Emeans(64, 256)
+        for name in ("float32", "float16", "bfloat16"):
+            with self.subTest(dtype=name):
+                self.assertEqual(memory_estimate(model, 100_000, name, "cuda:0"),
+                                 memory_estimate(model, 100_000, getattr(torch, name), "cuda"))
 
 
 if __name__ == "__main__":
