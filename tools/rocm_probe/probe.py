@@ -1,4 +1,4 @@
-import re, sys, inspect
+import re, sys
 import triton, triton.language as tl
 from triton.compiler import ASTSource
 from triton.backends.compiler import GPUTarget

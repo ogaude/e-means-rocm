@@ -34,7 +34,6 @@ CASES = {
                          dict(num_warps=8, num_stages=2)),
 }
 MM = re.compile(r"^\s+(v_mfma_\w+|v_wmma_\w+|v_swmmac\w*)", re.M)
-import io, contextlib, os
 for arch in sys.argv[2:]:
     for label, (fn, sig, cx, opts) in CASES.items():
         sig2 = dict(sig, **{k: "constexpr" for k in cx})

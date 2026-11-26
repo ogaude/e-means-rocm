@@ -310,6 +310,8 @@ GitHub Actions has no GPU, so CI runs the GPU-free part of the suite; GPU runs s
   torch on Python 3.10 to 3.14 (Triton compile checks skip), and the package job: build,
   `tools/check_dist.py`, `twine check`, the package without torch, and the tests against the
   installed package.
+  A lint job runs ruff's pyflakes rules (undefined names, redefinitions; unused imports only
+  in `tools/`, since the other folders mirror faiss). Locally: `ruff check .`.
 - `ci-rocm-stack.yml`, weekly and on demand: the GPU-free tests on AMD's ROCm torch and Triton
   (about 6.6 GB installed), which adds the Triton compile checks for the four AMD targets.
 

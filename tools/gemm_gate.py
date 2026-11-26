@@ -123,7 +123,7 @@ def main():
                               tf(t_g32), t_unf, tf(t_unf), t_gemm / t_tri, t_g32 / t_tri,
                               "" if agree > 0.99 else "  labels agree %.3f" % agree),
                           flush=True)
-                    del out16, out32
+                    out16 = out32 = None  # free before the next size (del confuses pyflakes about the lambdas)
                     torch.cuda.empty_cache()
 
     if not results:

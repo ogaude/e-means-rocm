@@ -2,7 +2,7 @@
 Triton ops, and compile offline for AMD targets. Reads the e-means source as text only."""
 import ast, re, sys
 from collections import Counter
-import triton, triton.language as tl
+import triton
 from triton.compiler import ASTSource
 from triton.backends.compiler import GPUTarget
 

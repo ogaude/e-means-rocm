@@ -5,6 +5,7 @@
 #          Without Triton the compile checks skip; ci-rocm-stack.yml runs them.
 # package: build the wheel and sdist, check their contents, check the package without
 #          torch, then run the suite against the installed package (tools/pkg_alias.py).
+# lint:    ruff's pyflakes rules (configuration in pyproject.toml), pinned ruff version.
 name: CI
 
 on:
@@ -24,6 +25,15 @@ env:
   TORCH_CPU_INDEX: https://download.pytorch.org/whl/cpu
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+      - name: ruff (pyflakes rules)
+        run: uvx ruff@0.17.6 check --output-format github .
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30

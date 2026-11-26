@@ -49,3 +49,17 @@ exclude = ["contrib/e_means/figure"]
 [tool.hatch.build.targets.sdist]
 only-include = ["contrib/e_means", "LICENSE", "README.md"]
 exclude = ["contrib/e_means/figure"]
+
+# Lint: pyflakes rules only (`ruff check`; CI pins the ruff version). contrib/, benchs/ and
+# tests/ mirror faiss files, so there only errors are reported, not unused imports or
+# variables: tidying those would diverge from upstream and conflict at every sync.
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+"contrib/**" = ["F401", "F841"]
+"benchs/**" = ["F401", "F841"]
+"tests/**" = ["F401", "F841"]
