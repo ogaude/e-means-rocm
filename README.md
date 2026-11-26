@@ -457,17 +457,18 @@ tools/gpu_session/    setup + one-shot session runner for a cloud GPU VM (see it
 ## Relation to upstream faiss
 
 This repository starts from [facebookresearch/faiss](https://github.com/facebookresearch/faiss)
-`main` at commit `14392c952788ca1d6980361cf01d1c8736afc4db` (2026-11-18). The first commit is an
-unmodified snapshot of `contrib/e_means`, `benchs/e_means` and the e-means tests, so
-`git diff d6e4215 -- contrib benchs tests` shows exactly what this fork changes in faiss's
-files. Those paths mirror faiss, so changes to them apply to a faiss checkout
-(`git format-patch d6e4215 -- contrib benchs tests`, then `git am`); `README.md`, `pyproject.toml`,
-`tools/` and `.gitignore` belong to this fork only. To see what upstream changed since the snapshot:
+`main` at commit `14392c952788ca1d6980361cf01d1c8736afc4db` (2026-11-18) and is synced to
+`b14b3d693161c7b1cbc5f2e398c8234b42b04c8b` (2026-11-25). Upstream code enters only through
+unmodified import commits: `d6e4215` (the first snapshot of `contrib/e_means`, `benchs/e_means`
+and the e-means tests) and `7268fac` (the same paths at `b14b3d69`), each merged into `main`. So
+`git diff 7268fac -- contrib benchs tests` shows exactly what this fork changes in faiss's
+files. Those paths mirror faiss, so changes to them apply to a faiss checkout at `b14b3d69` (`git diff 7268fac main -- contrib benchs tests > fork.patch`, then `git apply fork.patch`); `README.md`, `pyproject.toml`,
+`tools/` and `.gitignore` belong to this fork only. To see what upstream changed since the last sync:
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/facebookresearch/faiss.git /tmp/faiss
 git -C /tmp/faiss sparse-checkout set contrib/e_means benchs/e_means tests
-mkdir -p /tmp/snapshot && git archive d6e4215 contrib/e_means | tar -x -C /tmp/snapshot
+mkdir -p /tmp/snapshot && git archive 7268fac contrib/e_means | tar -x -C /tmp/snapshot
 diff -r /tmp/snapshot/contrib/e_means /tmp/faiss/contrib/e_means
 ```
 

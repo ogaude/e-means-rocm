@@ -7,7 +7,8 @@
 #     "successfully" with the operation silently missing);
 #   * with enable_fp_fusion=False, FMA-family instructions in the EMA kernel come only
 #     from the two tl.math.div_rn lines, i.e. no multiply/add pair was contracted;
-#   * the split kernels contain no FMA-family instruction at all;
+#   * the split kernels contain no FMA-family instruction, except inside the FP64
+#     division and square root of the axis step (their IEEE expansions use FMA);
 #   * the FP8 cast kernel compiles for every target.
 
 import re
@@ -67,6 +68,11 @@ def _on_div_rn(lines, line):
     return line is not None and line > 0 and "div_rn" in lines[line - 1]
 
 
+def _on_axis_step(lines, line):
+    # FP64 "/" and tl.sqrt expand to FMA-based IEEE sequences on AMD; nothing else may fuse.
+    return line is not None and line > 0 and "step = tl.sqrt(" in lines[line - 1]
+
+
 EMA_SIG = dict(sums=P, counts="*i64", centroids=P, usage=P, k=I32, d=I32,
                sum_stride="i64", count_stride="i64", alpha=P, decay=P)
 EMA_CASES = {
@@ -74,15 +80,18 @@ EMA_CASES = {
     "replace usage, device scalars": dict(DECAY=False, BLOCK_K=16, BLOCK_D=128, SCALARS=True),
 }
 EMA_SIG_HOST = dict(EMA_SIG, alpha=F32, decay=F32)
-SPLIT_SIG = dict(centroids=P, usage=P, source="*i64", target="*i64", d=I32, epsilon=F32,
+SPLIT_SIG = dict(centroids=P, usage=P, source="*i64", target="*i64", axes=P, norm="*fp64", d=I32,
                  scale=F32, decode_exponent="*i32")
-SPLIT_CASES = {
+_SPLIT_BASE = {
     "fp32": dict(BF16=False, FP8=False, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
     "bf16": dict(BF16=True, FP8=False, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
     "fp8 unscaled": dict(BF16=False, FP8=True, SCALED=False, BLOCK_D=128, LIBDEVICE_LDEXP=True),
     # AMD: ldexp replaced by an exact power-of-two multiply (no libdevice ldexp there).
     "fp8 scaled": dict(BF16=False, FP8=True, SCALED=True, BLOCK_D=128, LIBDEVICE_LDEXP=False),
 }
+# Cost-based revival splits along the axis (AXES), upstream's former FP64 PTX site.
+SPLIT_CASES = {("%s, axes" % label) if axes else label: dict(case, AXES=axes, count=None)
+               for axes in (False, True) for label, case in _SPLIT_BASE.items()}
 CAST_SIG = dict(source=P, out="*fp8e4nv", squares=P, peak="*i32", bias=P, k=I32, d=I32, scale=F32)
 CAST_CASES = {
     "affine": dict(width=128, QUANTIZED=True, AFFINE=True, BLOCK=2048),
@@ -102,7 +111,8 @@ class PtxFreeKernelsTest(unittest.TestCase):
         with open(ta.__file__) as handle:
             source = handle.read()
         for kernel in ("_cast_fp8_centroids_kernel", "_ema_update_kernel",
-                       "_write_float_splits_kernel"):
+                       "_write_float_splits_kernel", "_removal_stats_kernel",
+                       "_long_pieces_kernel", "_removal_update_kernel"):
             launch = source.split("%s[" % kernel, 1)[1].split(")\n", 1)[0]
             self.assertIn("enable_fp_fusion=False", launch, kernel)
 
@@ -136,11 +146,17 @@ class PtxFreeKernelsTest(unittest.TestCase):
                 self.assertTrue(outside)
 
     def test_split_kernels_have_no_fma(self):
+        with open(ta.__file__) as handle:
+            lines = handle.read().split("\n")
         for arch in AMD_ARCHS:
             for label, constexprs in SPLIT_CASES.items():
                 with self.subTest(arch=arch, case=label):
                     kernel = _compile(ta._write_float_splits_kernel, SPLIT_SIG, constexprs, arch)
-                    self.assertEqual(dict(_fused_lines(kernel.asm["amdgcn"])), {})
+                    hits = _fused_lines(kernel.asm["amdgcn"])
+                    if constexprs["AXES"]:
+                        hits = {line: count for line, count in hits.items()
+                                if not _on_axis_step(lines, line)}
+                    self.assertEqual(dict(hits), {})
 
     def test_fp8_cast_kernel_compiles(self):
         for arch in AMD_ARCHS:
@@ -165,7 +181,7 @@ class PtxFreeKernelsTest(unittest.TestCase):
         # float multiply/add/subtract must be an explicitly rounded .rn instruction (as
         # the inline assembly was), FMA only where the assembly had one (the affine
         # cast), and the BF16 split must round with cvt.rn.bf16.f32.
-        unrounded = re.compile(r"\b(mul|add|sub)\.f32\b")
+        unrounded = re.compile(r"\b(mul|add|sub)\.f(32|64)\b")
         target = GPUTarget("cuda", 90, 32)
 
         def ptx(fn, signature, constexprs):
@@ -175,8 +191,10 @@ class PtxFreeKernelsTest(unittest.TestCase):
                                   options=dict(num_warps=4, enable_fp_fusion=False)).asm["ptx"]
 
         split_cases = dict(SPLIT_CASES)
-        split_cases["fp8 scaled, libdevice ldexp"] = dict(
-            BF16=False, FP8=True, SCALED=True, BLOCK_D=128, LIBDEVICE_LDEXP=True)
+        for axes in (False, True):
+            split_cases["fp8 scaled, libdevice ldexp" + (", axes" if axes else "")] = dict(
+                BF16=False, FP8=True, SCALED=True, BLOCK_D=128, LIBDEVICE_LDEXP=True,
+                AXES=axes, count=None)
         for label, constexprs in split_cases.items():
             if not constexprs.get("LIBDEVICE_LDEXP", True):
                 continue  # the AMD power-of-two path is not used on NVIDIA
@@ -187,6 +205,11 @@ class PtxFreeKernelsTest(unittest.TestCase):
                     self.assertNotIn("fma", code)
                 if constexprs["BF16"]:
                     self.assertIn("cvt.rn.bf16.f32", code)
+                if constexprs["AXES"]:  # what upstream's FP64 PTX wrote explicitly
+                    for op in ("div.rn.f64", "sqrt.rn.f64", "mul.rn.f64", "sub.rn.f64",
+                               "add.rn.f64", "cvt.rn.f32.f64"):
+                        self.assertIn(op, code)
+                    self.assertNotIn("fma.rn.f64", code)
         for label, constexprs in CAST_CASES.items():
             with self.subTest(kernel="cast", case=label):
                 code = ptx(ta._cast_fp8_centroids_kernel, CAST_SIG, constexprs)
