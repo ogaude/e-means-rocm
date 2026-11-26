@@ -22,6 +22,11 @@ do not fit outside gfx942); "table" is what _int8_launch_config picks on this GP
 Distances are exact integers and ties go to the lowest index, so every candidate must
 reproduce the reference distances and labels exactly. d must be a multiple of 16 (the
 padded width the launcher would use anyway).
+
+"--second" times the kernels with the second-nearest distance on, as cost-based revival
+(upstream b14b3d69) calls them in training: SECOND=True, no second labels; for E4M3 the
+second-label buffer _launch_assignment allocates. Candidates must then also reproduce the
+reference second distances (INT8 exactly).
 """
 import argparse
 import itertools
@@ -34,6 +39,16 @@ from faiss.contrib.e_means import triton_assignment as ta
 
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32,
           "fp8": torch.float8_e4m3fn}
+
+# Second-nearest outputs for --second: buffers set in main(), passed by both launchers.
+SECOND = {}
+
+
+def second_kwargs():
+    if not SECOND:
+        return {}
+    return dict(second_ptr=SECOND["distance"], SECOND=True,
+                **({"second_label_ptr": SECOND["labels"]} if "labels" in SECOND else {}))
 
 
 def _family():
@@ -74,7 +89,7 @@ def int8_launch(x, c, norm, dist, labels, cfg):
         x.stride(0), x.stride(1), c.stride(0), c.stride(1),
         UNSIGNED=False, BLOCK_B=cfg["BLOCK_B"], BLOCK_K=bk, BLOCK_D=cfg["BLOCK_D"],
         WIDE_CENTROID=False, FULL_D=cfg["FULL_D"],
-        PACKED=48896 * d * bk + bk - 1 < 2**31,
+        PACKED=48896 * d * bk + bk - 1 < 2**31, **second_kwargs(),
         num_warps=cfg["num_warps"], num_stages=cfg["num_stages"])
 
 
@@ -144,7 +159,7 @@ def launch(x, c, norm, dist, labels, cfg):
         BLOCK_B=cfg["BLOCK_B"], BLOCK_K=cfg["BLOCK_K"], BLOCK_D=cfg["BLOCK_D"],
         FULL_D=cfg["FULL_D"], REDUCED=reduced, FP16=c.dtype == torch.float16,
         FP8=c.dtype == torch.float8_e4m3fn,
-        WIDE_CENTROID=False, SPHERICAL=False,
+        WIDE_CENTROID=False, SPHERICAL=False, **second_kwargs(),
         num_warps=cfg["num_warps"], num_stages=cfg["num_stages"])
 
 
@@ -165,6 +180,8 @@ def main():
     ap.add_argument("--quick", action="store_true", help="fewer warp counts")
     ap.add_argument("--compare", action="store_true",
                     help="time only the upstream and per-family table configurations")
+    ap.add_argument("--second", action="store_true",
+                    help="second-nearest distance on, as cost-based revival trains")
     a = ap.parse_args()
     torch.manual_seed(0)
     print("device:", torch.cuda.get_device_name(0), "| target:",
@@ -185,8 +202,21 @@ def main():
                     dist = torch.empty(a.rows, device="cuda")
                     labels = torch.empty(a.rows, device="cuda", dtype=torch.int64)
                     run, ref = launch, upstream(dtype, d)
+                SECOND.clear()
+                if a.second:
+                    SECOND["distance"] = torch.empty_like(dist)
+                    if dtype == torch.float8_e4m3fn:  # as _launch_assignment
+                        SECOND["labels"] = torch.empty(a.rows, device="cuda", dtype=torch.int32)
                 run(x, c, norm, dist, labels, ref)
                 ref_labels, ref_dist = labels.clone(), dist.clone()
+                ref_second = SECOND["distance"].clone() if SECOND else None
+
+                def second_ok(exact):
+                    if ref_second is None:
+                        return True
+                    got = SECOND["distance"]
+                    return (torch.equal(got, ref_second) if exact
+                            else torch.allclose(got, ref_second, rtol=1e-5, atol=1e-4))
                 t_ref = triton.testing.do_bench(lambda: run(x, c, norm, dist, labels, ref))
                 if a.compare:
                     cfg = int8_table(d, a.rows) if int8 else table(dtype, d)
@@ -194,12 +224,13 @@ def main():
                     torch.cuda.synchronize()
                     mismatch = int((labels != ref_labels).sum())
                     if int8:
-                        ok = not mismatch and torch.equal(dist, ref_dist)
+                        ok = not mismatch and torch.equal(dist, ref_dist) and second_ok(True)
                     else:
-                        ok = not mismatch or torch.allclose(dist, ref_dist, rtol=1e-5, atol=1e-4)
+                        ok = ((not mismatch or torch.allclose(dist, ref_dist, rtol=1e-5, atol=1e-4))
+                              and second_ok(False))
                     t = triton.testing.do_bench(lambda: run(x, c, norm, dist, labels, cfg))
-                    print("%-4s d=%-4d k=%-6d upstream %8.3f ms  table %8.3f ms  %5.2fx  %s%s" % (
-                        name, d, k, t_ref, t, t_ref / t, label(cfg),
+                    print("%-4s d=%-4d k=%-6d%s upstream %8.3f ms  table %8.3f ms  %5.2fx  %s%s" % (
+                        name, d, k, " +2nd" if a.second else "", t_ref, t, t_ref / t, label(cfg),
                         "" if ok else "  RESULTS DIFFER"), flush=True)
                     continue
                 results, failed = [], 0
@@ -215,12 +246,13 @@ def main():
                         torch.cuda.synchronize()
                         mismatch = int((labels != ref_labels).sum())
                         if int8:  # exact integers, lowest-index ties: must be identical
-                            bad = mismatch or not torch.equal(dist, ref_dist)
+                            bad = mismatch or not torch.equal(dist, ref_dist) or not second_ok(True)
                         else:
                             # Different tile orders may break exact ties differently;
                             # a label change must not change the winning distance.
-                            bad = mismatch and not torch.allclose(dist, ref_dist, rtol=1e-5,
-                                                                  atol=1e-4)
+                            bad = ((mismatch and not torch.allclose(dist, ref_dist, rtol=1e-5,
+                                                                    atol=1e-4))
+                                   or not second_ok(False))
                         if bad:
                             failed += 1
                             continue
