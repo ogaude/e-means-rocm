@@ -113,13 +113,42 @@ _AMD_DIRECT_CONFIGS = {
 }
 
 
-def _direct_config(family, is_reduced, is_fp8, d, wide_rows_ok=True):
+# Rules for launches that also return the second-nearest distance (cost-based revival,
+# upstream b14b3d69): (lo, hi, min_rows, config), used for lo < d <= hi from min_rows rows,
+# before the family's ordinary rules. Swept with `tune_assign.py --second` (65,536 rows,
+# k = 4,096), then timed against the ordinary rule at 2,048 to 262,144 rows and k = 1,024 and
+# 16,384 (2026-11-26, RX 9060 XT); kept only where they win at every batch size they cover.
+_AMD_DIRECT_SECOND_CONFIGS = {
+    "rdna4": {
+        "fp8": ((64, 128, 8192, (64, 64, None, 4, 1)),),   # FULL_D, 1.46-2.31x (2,048 rows: 0.54x)
+    },
+}
+_AMD_INT8_SECOND_CONFIGS = {
+    "rdna4": (
+        (0, 64, 16384, (True, 64, 128, None, 4, 1)),       # 1.15-1.74x (8,192 rows: 0.73x)
+    ),
+}
+
+
+def _second_rule(rules, d, second_rows):
+    """The config of the first second-output rule covering d and second_rows, or None."""
+    if second_rows is None:
+        return None
+    for lo, hi, min_rows, config in rules:
+        if lo < d <= hi and second_rows >= min_rows:
+            return config
+    return None
+
+
+def _direct_config(family, is_reduced, is_fp8, d, wide_rows_ok=True, second_rows=None):
     """Direct-kernel (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
 
     ``family`` is the AMD architecture family, or None on NVIDIA and untuned devices
     (then the module constants apply, as upstream). ``wide_rows_ok`` says whether the
     tensors allow the 128-row reduced-precision tile at d > 128 (unit stride,
-    16-element pitch, 16-byte alignment). Pure, so tests can check every family.
+    16-element pitch, 16-byte alignment). ``second_rows`` is the row count of a launch that
+    also returns the second-nearest distance (None otherwise): such launches use
+    _AMD_DIRECT_SECOND_CONFIGS where one applies. Pure, so tests can check every family.
     """
     full_d = is_reduced and _DIRECT_REDUCED_BLOCK_D < d <= _FULL_D_MAX_D
     direct_block_d = _DIRECT_REDUCED_BLOCK_D if is_reduced else _DIRECT_FP32_BLOCK_D
@@ -129,6 +158,12 @@ def _direct_config(family, is_reduced, is_fp8, d, wide_rows_ok=True):
         direct_block_d = 128
     rules = _AMD_DIRECT_CONFIGS.get(family) if family is not None else None
     kind = "fp8" if is_fp8 else "reduced" if is_reduced else "fp32"
+    second = _second_rule(_AMD_DIRECT_SECOND_CONFIGS.get(family, {}).get(kind, ()), d, second_rows)
+    if second is not None:
+        block_b, block_k, block_d, num_warps, num_stages = second
+        if full_d:
+            block_d = max(16, triton.next_power_of_2(d))
+        return full_d, block_b, block_k, block_d, num_warps, num_stages
     for max_d, config in (rules or {}).get(kind, ()):
         if max_d is None or d <= max_d:
             block_b, block_k, block_d, num_warps, num_stages = config
@@ -239,12 +274,21 @@ def _int8_default_config(physical_d, family=None):
     return full_d, block_b, block_k, block_d, num_warps, num_stages
 
 
-def _int8_launch_config(physical_d, family=None, rows=None):
+def _int8_launch_config(physical_d, family=None, rows=None, second=False):
     """INT8 assignment (FULL_D, BLOCK_B, BLOCK_K, BLOCK_D, num_warps, num_stages).
 
     ``family`` is the AMD architecture family, or None on NVIDIA (upstream settings).
+    ``second``: the launch also returns the second-nearest distance; then
+    _AMD_INT8_SECOND_CONFIGS applies where it covers physical_d and rows.
     Pure, so offline compile tests can check every family's configuration.
     """
+    config = _second_rule(_AMD_INT8_SECOND_CONFIGS.get(family, ()), physical_d,
+                          rows if second else None)
+    if config is not None:
+        full_d, block_b, block_k, block_d, num_warps, num_stages = config
+        if full_d and block_d is None:
+            block_d = max(16, triton.next_power_of_2(physical_d))
+        return full_d, block_b, block_k, block_d, num_warps, num_stages
     rules = tuple((max_d, config) for max_d, max_rows, config
                   in _AMD_INT8_SMALL_CONFIGS.get(family, ())
                   if rows is not None and rows <= max_rows)
@@ -1370,7 +1414,7 @@ def _launch_assignment(
                            and t.data_ptr() % 16 == 0 for t in (x, centroids))
         family = _amd_family(x.device)
         _, block_b, block_k, block_d, num_warps, num_stages = _direct_config(
-            family, is_reduced, is_fp8, d, wide_rows_ok)
+            family, is_reduced, is_fp8, d, wide_rows_ok, second_rows=b if second is not None else None)
         if full_d and family is None:
             # Upstream's CUDA shared-memory fallback (K64 below SM80 with < 96 KiB);
             # on HIP _full_d_config is _FULL_D_CONFIG, which _direct_config already used.
@@ -1640,7 +1684,7 @@ def assign_int8_rows(
 
         family = device_profile(x.device).family
     full_d, block_b, block_k, block_d, num_warps, num_stages = _int8_launch_config(
-        physical_d, family, b
+        physical_d, family, b, second=second_out is not None
     )
     # The staged width is bounded and16-aligned by _int8_physical_d;
     # its CUDA allocation has aligned unit-stride rows. Check before staging.

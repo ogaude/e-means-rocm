@@ -79,6 +79,21 @@ class Int8LaunchConfigTest(unittest.TestCase):
                             self.assertTrue(MATRIX.search(kernel.asm["amdgcn"]),
                                             "no integer matrix instruction")
 
+    def test_second_output_rule_fits(self):
+        # The second-output rule (cost-based revival) on RDNA4, with the second output on.
+        budget = profile_for_arch("gfx1200").lds_bytes
+        lo, hi, min_rows, _ = ta._AMD_INT8_SECOND_CONFIGS["rdna4"][0]
+        rule = lambda physical_d, family: ta._int8_launch_config(physical_d, family, min_rows,
+                                                                 second=True)
+        for physical_d in (16, 32, hi):
+            for unsigned in (False, True):
+                with self.subTest(d=physical_d, unsigned=unsigned):
+                    kernel = _compile("gfx1200", physical_d, unsigned=unsigned, config=rule,
+                                      second=True)
+                    self.assertLessEqual(kernel.metadata.shared, budget)
+                    self.assertTrue(MATRIX.search(kernel.asm["amdgcn"]),
+                                    "no integer matrix instruction")
+
     def test_small_batch_configurations_fit(self):
         small = lambda physical_d, family: ta._int8_launch_config(physical_d, family, 1024)
         for family, arch in ARCHS.items():

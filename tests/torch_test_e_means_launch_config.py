@@ -330,3 +330,67 @@ class AmdArchFallbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_TRITON, "triton not installed")
+class SecondOutputRulesTest(unittest.TestCase):
+    """Second-output rules (cost-based revival): where they apply, and that they fit."""
+
+    def test_fp8_rule_boundaries(self):
+        rule = ta._AMD_DIRECT_SECOND_CONFIGS["rdna4"]["fp8"][0]
+        lo, hi, min_rows, (bb, bk, _, warps, stages) = rule
+        ordinary = lambda d: ta._direct_config("rdna4", True, True, d)
+        for d in (lo + 1, 96, hi):
+            with self.subTest(d=d):
+                self.assertEqual(ta._direct_config("rdna4", True, True, d, second_rows=min_rows),
+                                 (True, bb, bk, max(16, triton.next_power_of_2(d)), warps, stages))
+                # Below the batch size, without a second output, or off RDNA4: unchanged.
+                for got in (ta._direct_config("rdna4", True, True, d, second_rows=min_rows - 1),
+                            ta._direct_config("rdna4", True, True, d)):
+                    self.assertEqual(got, ordinary(d))
+        for d in (lo, hi + 64):
+            self.assertEqual(ta._direct_config("rdna4", True, True, d, second_rows=1 << 20), ordinary(d))
+        for family in (None, "cdna3", "cdna4", "rdna3"):
+            self.assertEqual(ta._direct_config(family, True, True, 128, second_rows=1 << 20),
+                             ta._direct_config(family, True, True, 128))
+        # BF16/FP16 and FP32 have no second-output rule.
+        for reduced in (True, False):
+            self.assertEqual(ta._direct_config("rdna4", reduced, False, 128, second_rows=1 << 20),
+                             ta._direct_config("rdna4", reduced, False, 128))
+
+    def test_int8_rule_boundaries(self):
+        lo, hi, min_rows, config = ta._AMD_INT8_SECOND_CONFIGS["rdna4"][0]
+        for d in (16, hi):
+            with self.subTest(d=d):
+                full, bb, bk, bd, warps, stages = config
+                self.assertEqual(ta._int8_launch_config(d, "rdna4", min_rows, second=True),
+                                 (full, bb, bk, max(16, triton.next_power_of_2(d)) if bd is None else bd,
+                                  warps, stages))
+                self.assertEqual(ta._int8_launch_config(d, "rdna4", min_rows),
+                                 ta._int8_launch_config(d, "rdna4", min_rows, second=False))
+                self.assertEqual(ta._int8_launch_config(d, "rdna4", min_rows - 1, second=True),
+                                 ta._int8_launch_config(d, "rdna4", min_rows - 1))
+        self.assertEqual(ta._int8_launch_config(hi + 64, "rdna4", 1 << 20, second=True),
+                         ta._int8_launch_config(hi + 64, "rdna4", 1 << 20))
+        self.assertEqual(ta._int8_launch_config(64, None, 1 << 20, second=True),
+                         ta._int8_launch_config(64, None, 1 << 20))
+
+    def test_fp8_rule_fits_lds(self):
+        budget = dp.profile_for_arch("gfx1200").lds_bytes
+        lo, hi, min_rows, _ = ta._AMD_DIRECT_SECOND_CONFIGS["rdna4"]["fp8"][0]
+        for d in (lo + 1, hi):
+            full_d, bb, bk, bd, warps, stages = ta._direct_config(
+                "rdna4", True, True, d, second_rows=min_rows)
+            for variant, (second, label) in SECOND_VARIANTS.items():
+                with self.subTest(d=d, outputs=variant):
+                    cx = dict(BLOCK_B=bb, BLOCK_K=bk, BLOCK_D=bd, FULL_D=full_d, REDUCED=True,
+                              FP16=False, FP8=True, WIDE_CENTROID=False, x_desc=None,
+                              centroid_desc=None, SPHERICAL=False)
+                    extra_sig, extra_cx = _second_args(
+                        dict(second_ptr=("*fp32", "second"), second_label_ptr=("*i32", "buffer"),
+                             pending_ptr=("*i32", "caller")),
+                        second, label, True, defer=d <= ta._DEFER_SECOND_LABEL_MAX_D)
+                    cx.update(extra_cx)
+                    sig = dict(ASSIGN_SIG, x_ptr="*fp8e4nv", centroid_ptr="*fp8e4nv", **extra_sig)
+                    kernel = _compile(ta._assign_kernel, sig, cx, "gfx1200", warps, stages)
+                    self.assertLessEqual(kernel.metadata.shared, budget)
