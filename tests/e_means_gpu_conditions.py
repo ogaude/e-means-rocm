@@ -10,6 +10,12 @@ Skips use these instead:
 * triton_gpu()       either of the above with Triton: the Triton backend runs here.
 * amd_fp8_gpu()      AMD family with a native E4M3 matrix instruction (gfx950, gfx120x).
 * native_reduced_gpu() native PyTorch FP16/BF16 assignment runs here.
+* nvidia_sm(*caps)   an NVIDIA GPU whose SM is one of caps.
+* int8_gpu()         INT8 assignment runs here: NVIDIA SM80/SM90/SM100 (upstream) or an
+                     AMD target family.
+* fp8_gpu()          E4M3 assignment runs here: NVIDIA SM90/SM100/SM103 (upstream) or
+                     gfx950/gfx120x.
+* cute_gpu()         the CuTe backend's NVIDIA SM90 (never AMD).
 * graph_replay_gpu() a GPU on which training uses CUDA-graph replay (on ROCm only
                      with EMEANS_ROCM_GRAPH_REPLAY=1; see device_profile).
 
@@ -43,6 +49,23 @@ def amd_fp8_gpu():
     from faiss.contrib.e_means.device_profile import amd_fp8_supported
 
     return amd_fp8_supported("cuda")
+
+
+def nvidia_sm(*capabilities):
+    return (torch.cuda.is_available() and torch.version.hip is None
+            and torch.cuda.get_device_capability() in capabilities)
+
+
+def int8_gpu():
+    return nvidia_sm((8, 0), (9, 0), (10, 0)) or amd_triton_gpu()
+
+
+def fp8_gpu():
+    return nvidia_sm((9, 0), (10, 0), (10, 3)) or amd_fp8_gpu()
+
+
+def cute_gpu():
+    return nvidia_sm((9, 0))
 
 
 def triton_gpu():

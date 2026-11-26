@@ -23,6 +23,7 @@ from faiss.contrib.e_means.sharded_centroids import (
 )
 from faiss.contrib.e_means.sharded_centroids_ivf import EmeansShardedCentroidsIVF
 from faiss.contrib.e_means.torch_backend import TorchBackend
+from e_means_gpu_conditions import fp8_gpu, int8_gpu
 
 
 class _CPUAssignment(TorchBackend):
@@ -180,15 +181,15 @@ def _ivf_statistics_worker(rank, rendezvous):
 def _owner_keys(rank, device):
     cases = [(torch.tensor([[8192., 0.]], device=device),
               torch.tensor([[0., 1.], [0., 0.]], device=device), 1, 1.)]
-    cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
-    if cap in ((8, 0), (9, 0), (10, 0)):
+    cuda = device.type == "cuda"  # capability checks are vendor-aware: e_means_gpu_conditions
+    if cuda and int8_gpu():
         rows = torch.full((1, 512), -128, device=device, dtype=torch.int8)
         rows[0, -1] = 0
         for last, margin in (([0., 1.], 1.), ([1., 1.], 0.)):
             centers = torch.full((2, 512), 127., device=device)
             centers[:, -1] = torch.tensor(last, device=device)
             cases.append((rows, centers, 0, margin))
-    if cap in ((9, 0), (10, 0), (10, 3)):
+    if cuda and fp8_gpu():
         centers = torch.full((4, 128), 448., device=device)
         centers[:, -1] = torch.tensor([.25, .125, .5, .75], device=device)
         rows = torch.full((2, 128), 448., device=device)
@@ -197,7 +198,7 @@ def _owner_keys(rank, device):
     for rows, centers, winner, margin in cases:
         k = len(centers) // 2
         model = EmeansShardedCentroids(rows.shape[1], len(centers), group=dist.group.WORLD,
-                                       quantizer=None, assignment_backend="native" if cap is None else "triton",
+                                       quantizer=None, assignment_backend="native" if not cuda else "triton",
                                        nepochs=1, batch_size=2 * len(rows), assignment_chunk_size=1)
         QuantizedEmeans.begin(model, 2 * len(rows), centers[rank * k:(rank + 1) * k])
         model.accumulate(rows[:0])  # Bind raw dtype and its cost state.

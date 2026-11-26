@@ -20,6 +20,7 @@ from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans
 from faiss.contrib.e_means.quantizer import CastQuantizer
 from faiss.contrib.e_means.quantizer_int8 import Int8Quantizer
 from faiss.contrib.e_means import e_means_distributed as replica
+from e_means_gpu_conditions import int8_gpu
 
 
 def _host(value):
@@ -363,7 +364,7 @@ def _worker(rank, world, rendezvous, cuda=False, subgroup=False):
                     _caller_case(group, device, 'sparse', dtype=dtype)
                 _caller_case(group, device, 'dense', dtype=torch.bfloat16, centered=True)
                 _caller_case(group, device, 'dense', dtype=torch.bfloat16, custom_decode=True)
-                if torch.cuda.get_device_capability(device) in ((8, 0), (9, 0), (10, 0)):
+                if int8_gpu():  # vendor-aware: e_means_gpu_conditions
                     _caller_case(group, device, 'sparse', calibrated=True, epochs=2.5)
         dist.barrier()
     finally:

@@ -16,6 +16,7 @@ from faiss.contrib.e_means.quantizer import CastQuantizer
 from faiss.contrib.e_means.quantizer_int8 import Int8Quantizer
 from faiss.contrib.e_means.quantizer_fp8 import Fp8Quantizer
 from faiss.contrib.e_means.torch_backend import CuteBackend, TritonBackend
+from e_means_gpu_conditions import cute_gpu, fp8_gpu, int8_gpu, triton_gpu
 
 
 def _reference(codes, values, centroids, axes, dtype, quantizer, spherical=False):
@@ -221,14 +222,15 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
                   (torch.float16, "centered"), (torch.bfloat16, "centered"),
                   (torch.bfloat16, "custom"), (torch.bfloat16, "spherical"))]
         cases += [("triton", dtype, kind) for _, dtype, kind in cases]
-        if torch.cuda.get_device_capability() == (9, 0):
+        # Vendor-aware (ROCm reports gfx numbers as the capability): e_means_gpu_conditions.
+        cute = cute_gpu()
+        if cute:
             cases += [("cute", torch.bfloat16, kind) for kind in ("cast", "centered", "custom", "spherical")]
-        cap = torch.cuda.get_device_capability()
-        encoded = [(torch.int8, "int8"), (torch.int8, "int8_cal")] if cap in ((8, 0), (9, 0), (10, 0)) else []
-        if cap in ((9, 0), (10, 0), (10, 3)):
+        encoded = [(torch.int8, "int8"), (torch.int8, "int8_cal")] if int8_gpu() else []
+        if fp8_gpu():
             encoded += [(torch.float8_e4m3fn, "fp8"), (torch.float8_e4m3fn, "fp8_cal")]
         cases += [(backend, dtype, kind) for dtype, kind in encoded
-                  for backend in (("triton", "cute") if cap == (9, 0) else ("triton",))]
+                  for backend in (("triton", "cute") if cute else ("triton",))]
         for backend, dtype, kind in cases:
             with self.subTest(backend=backend, dtype=dtype, kind=kind):
                 if dtype == torch.bfloat16 and torch.cuda.get_device_capability() < (8, 0):
@@ -339,8 +341,7 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
                 self.assertEqual(model.n_splits, 2)
                 torch.testing.assert_close(model._usage, initial.new_full((4,), .5), rtol=0, atol=0)
 
-    @unittest.skipUnless(torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0),
-                         "BF16 requires NVIDIA SM80 or later")
+    @unittest.skipUnless(triton_gpu(), "BF16 Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_old_owner_and_update_hooks_receive_decoded_statistics(self):
         initial = torch.tensor([[100., -50.], [104., -50.], [112., -50.]], device="cuda")
         rows = initial[[0, 1, 2, 0, 1]] + .25
@@ -378,15 +379,14 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
         self.assertEqual(model.updates, 1)
         torch.testing.assert_close(model._removal_stats.cpu().double(), expected[2] * .5, rtol=1e-5, atol=1e-5)
 
-    @unittest.skipUnless(torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0),
-                         "BF16 requires NVIDIA SM80 or later")
+    @unittest.skipUnless(triton_gpu(), "BF16 Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_ordinary_accumulation_owner_receives_decoded_rows(self):
         initial = torch.tensor([[100., -50.], [104., -50.], [112., -50.]], device="cuda")
         rows = initial[[0, 1, 2, 0, 1]] + .25
         q = CastQuantizer(2, torch.bfloat16, center=True)
         q.train(torch.tensor([[99., -51.], [101., -49.]], device="cuda"))
         codes = q.compute_codes(rows)
-        base = CuteBackend if torch.cuda.get_device_capability() == (9, 0) else TritonBackend
+        base = CuteBackend if cute_gpu() else TritonBackend
         seen = []
 
         class SumOwner(base):
@@ -406,8 +406,7 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
         torch.testing.assert_close(batch["sums"].cpu().double(), expected[0], rtol=0, atol=0)
         torch.testing.assert_close(batch["removal"].cpu().double(), expected[2], rtol=1e-5, atol=1e-5)
 
-    @unittest.skipUnless(torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
-                         "CuTe BF16 requires NVIDIA SM90")
+    @unittest.skipUnless(cute_gpu(), "CuTe BF16 requires NVIDIA SM90")
     def test_old_cute_owner_keeps_completed_second_on_decoded_rows(self):
         # One represented coordinate isolates row-basis/completion ownership;
         # the broader floating references cover norm-plus-dot rounding.
@@ -464,8 +463,7 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
                         model.update(dict(sums=torch.zeros_like(initial), counts=initial.new_zeros(2),
                                           objective=initial.new_zeros((), dtype=torch.float64), n=2))
 
-    @unittest.skipUnless(torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0),
-                         "BF16 requires NVIDIA SM80 or later")
+    @unittest.skipUnless(triton_gpu(), "BF16 Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_centered_closing_repairs_labels_and_rebuilds_decoded_means(self):
         # The actual closing loop forces one physical split at the normal
         # fifth update. This is a retention/row-basis witness, not a claim
@@ -484,7 +482,7 @@ class TestFloatingRevivalCUDA(unittest.TestCase):
                 self.split_positions = self._centroids.clone()
                 return super().finalize()
 
-        backends = ("native", "triton", "cute") if torch.cuda.get_device_capability() == (9, 0) else ("native", "triton")
+        backends = ("native", "triton", "cute") if cute_gpu() else ("native", "triton")
         for backend in backends:
             kinds = ("centered", "cast", "int8_cal", "int8", "custom") if backend != "native" else ("centered", "cast")
             for kind in kinds:
