@@ -64,6 +64,31 @@ def _fused_removal_rows(model, values, labels, margin):
         add_stats=False))
 
 
+def _fused_code_removal(model, codes, labels, margin):
+    """e-means-rocm: as _fused_removal_rows, but decode stock INT8 / E4M3 codes in the kernel.
+
+    Int8Quantizer and Fp8Quantizer decode as ldexp(code, e) (+ shift); the kernel computes
+    exactly that, so the terms equal _fused_removal_rows on the decoded rows, without
+    materializing them in FP32. False for other quantizers, overridden decoding or codes the
+    kernel cannot take (the caller then decodes in PyTorch).
+    """
+    from .quantizer_fp8 import Fp8Quantizer
+    from .quantizer_int8 import Int8Quantizer
+
+    q, backend = model.quantizer, model._execution_backend
+    if not (type(q) in (Int8Quantizer, Fp8Quantizer) and codes.is_cuda and codes.dtype == q.dtype
+            and _same_operation(q.decode, type(q).decode, q)
+            and _same_operation(model._statistics_rows, QuantizedEmeans._statistics_rows, model)
+            and isinstance(backend, TritonBackend)
+            and _same_operation(backend.accumulate_removal, TritonBackend.accumulate_removal, backend)):
+        return False
+    zero = codes.new_zeros(len(codes), dtype=torch.float32)
+    gap = zero if margin is None else margin.float()
+    return bool(backend.accumulate_removal(
+        codes, labels, None, zero, gap, model._axes, model._readout(), model._batch_removal,
+        add_stats=False, decode=(q._decode_exponent, q.shift)))
+
+
 def _assign_cost_rows(model, rows, centroids, centroid_norm):
     """One genuine assignment invocation; exact integer or completed FP32 gap."""
     if model.k < 2:
@@ -573,7 +598,7 @@ class QuantizedEmeans(Emeans):
             else:
                 distance, labels = self._assign_rows(rows, centroids, centroid_norm)
             codes = statistics_codes(rows, centroids, self._assignment_backend, q, second=removal)
-            if removal:
+            if removal and not _fused_code_removal(self, codes, labels, margin):
                 values = self._statistics_rows(codes)
                 if not _fused_removal_rows(self, values, labels, margin):
                     _accumulate_removal_rows(self, values, labels, margin)
@@ -585,8 +610,9 @@ class QuantizedEmeans(Emeans):
             if self._removal_stats is not None and not removal:
                 # Mass-based revival reads only U (p y, y = x - c); R stays 0.
                 codes = statistics_codes(rows, centroids, self._assignment_backend, q)
-                values = statistics_values(rows, codes, q).float()
-                if not _fused_removal_rows(self, values, labels, None):
+                values = None if _fused_code_removal(self, codes, labels, None) else (
+                    statistics_values(rows, codes, q).float())
+                if values is not None and not _fused_removal_rows(self, values, labels, None):
                     y = values - self._readout()[labels]
                     p = (y * self._axes[labels]).sum(1, keepdim=True)
                     self._batch_removal.index_add_(0, labels, torch.cat((p * y, torch.zeros_like(p)), dim=1))
