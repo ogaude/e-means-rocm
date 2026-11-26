@@ -5,11 +5,13 @@ faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GP
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
 > **Status: v0.2.5 released (tag `e-means-rocm-v0.2.5`) for RX 9000 (gfx1200), installable with
-> `pip install emeans-rocm`. MI300X follows in v0.3.**
+> `pip install emeans-rocm`. v0.2.6 (synced with upstream faiss `b14b3d69`) is in preparation on
+> this branch. MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16; INT8/UINT8 and FP8 through `QuantizedEmeans`), the whole e-means test suite passes,
-> and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.1× to 9.3× faster than
-> PyTorch for BF16, and tuned INT8 and FP8 train 1.02× to 1.37× faster than BF16. MI300X
+> and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.8× to 15× faster than
+> PyTorch for BF16, the fastest format here (INT8 and FP8 train at 0.58× to 0.85× of BF16's speed
+> since cost-based revival, v0.2.6; see Results). MI300X
 > (gfx942) is planned for v0.3; MI350 (gfx950) and RX 7000 (gfx11xx) are compile-checked only.
 > **NVIDIA has not been re-run on hardware** (see Known limitations).
 
@@ -97,32 +99,44 @@ PyTorch, which upstream already supports.
 ## Results on RX 9000 (gfx1200)
 
 Measured on an RX 9060 XT (16 GB), ROCm 10.1, torch 2.14.0+rocm10.1.0, triton 3.8.0, all in one
-run (2026-11-20). Times are warm `train()` runs of 3 epochs on random FP32 data, converted to
-each format: BF16 and FP16 by the default path during training, INT8 and FP8 by a calibrated
-quantizer before timing (encoding not timed, as when data is stored encoded). "PyTorch" is
+run (2026-11-26, v0.2.6: upstream faiss `b14b3d69`, with cost-based cluster revival as the
+default). Times are warm `train()` runs of 3 epochs on random FP32 data, converted to each format:
+BF16 and FP16 by the default path during training, INT8 and FP8 by a calibrated quantizer before
+timing (encoding not timed, as when data is stored encoded). "PyTorch" is
 `assignment_backend="native"`. `tools/bench_train.py` reproduces these runs; speed-ups below are
 computed from the unrounded times.
 
 | Data format | 200k × 64, 1,024 centroids | 1M × 128, 4,096 centroids | 4M × 128, 16,384 centroids |
 |---|---|---|---|
-| BF16, Triton (the default for FP32 input) | 0.028 s | 0.232 s | 1.491 s |
-| BF16, PyTorch | 0.058 s | 1.008 s | 13.864 s |
-| FP16, Triton | 0.029 s | 0.227 s | 1.503 s |
-| FP16, PyTorch | 0.058 s | 0.980 s | 13.410 s |
-| Native FP32, Triton | 0.039 s | 0.638 s | 8.601 s |
-| Native FP32, PyTorch | 0.063 s | 1.015 s | 14.132 s |
-| INT8, Triton | 0.028 s | 0.193 s | 1.090 s |
-| FP8, Triton | **0.025 s** | **0.169 s** | 1.143 s |
+| BF16, Triton (the default for FP32 input) | 0.032 s | 0.133 s | **1.144 s** |
+| BF16, PyTorch | 0.088 s | 1.330 s | 17.202 s |
+| FP16, Triton | **0.031 s** | **0.119 s** | 1.171 s |
+| FP16, PyTorch | 0.089 s | 1.306 s | 16.814 s |
+| Native FP32, Triton | 0.041 s | 0.527 s | 7.948 s |
+| Native FP32, PyTorch | 0.092 s | 1.348 s | 15.701 s |
+| INT8, Triton | 0.039 s | 0.229 s | 1.353 s |
+| FP8, Triton | 0.039 s | 0.212 s | 1.406 s |
 
 | Speed-up | 200k × 64 | 1M × 128 | 4M × 128 |
 |---|---|---|---|
-| Triton over PyTorch, BF16 | 2.1× | 4.3× | 9.3× |
-| Triton over PyTorch, FP16 | 2.0× | 4.3× | 8.9× |
-| Triton over PyTorch, FP32 | 1.6× | 1.6× | 1.6× |
-| INT8 over BF16 (Triton) | 1.02× | 1.20× | 1.37× |
-| FP8 over BF16 (Triton) | 1.13× | 1.37× | 1.30× |
+| Triton over PyTorch, BF16 | 2.8× | 10.0× | 15.0× |
+| Triton over PyTorch, FP16 | 2.9× | 11.0× | 14.4× |
+| Triton over PyTorch, FP32 | 2.3× | 2.6× | 2.0× |
+| INT8 over BF16 (Triton) | 0.81× | 0.58× | 0.85× |
+| FP8 over BF16 (Triton) | 0.81× | 0.63× | 0.81× |
 
-Final losses: FP16 and FP32 within 0.02% of BF16, INT8 within 0.06%, FP8 within 0.08%.
+Final losses: FP16 and FP32 within 0.01% of BF16, INT8 within 0.05%, FP8 within 0.08%.
+
+**Compared with v0.2.5** (its tables from 2026-11-20; a run of v0.2.5 on 2026-11-26 reproduced
+them within 1% at 1M × 128): BF16 and FP16 train 1.3× to 1.9× faster at the two larger shapes.
+The gain comes with cost-based revival: with revival off, BF16 at 1M × 128 is back at v0.2.5's
+time, and the revival path sums each batch in one fused Triton kernel. INT8 and FP8 now train
+slower than BF16 (in v0.2.5 they were 1.0× to 1.4× faster), because revival also needs each
+row's second-nearest distance and its decoded values. Right after the sync they were 2.2× to
+2.6× slower than in v0.2.5 (at 1M × 128); this release brings that to 1.2× to 1.6× (fused
+revival statistics, codes decoded in the kernel, launch rules for the second-nearest output).
+At 1M × 128, `unused_threshold=0` turns revival off and gives v0.2.5's INT8/FP8 times back
+(0.200 s and 0.176 s), at a cost in quality: the training objective rose by about 0.9%.
 
 ### What the RDNA4 tuning gains
 
@@ -138,25 +152,36 @@ are the same or, where tie order differs, the distances agree within rtol 1e-5 /
 | INT8 | 2.99× to 8.51× | 2.57× to 10.4× |
 | FP8 | 1.22× to 2.74× | 0.99× to 2.75× |
 
-Training, each format with its tables on against off (same run, 3 warm epochs;
-`tools/bench_train.py --no-tables` gives the "off" side):
+Training, each format with its tables on against off (3 warm epochs, v0.2.6;
+`tools/bench_train.py --no-tables` gives the "off" side, all AMD tables cleared, including the
+second-output rules below):
 
 | Format | 200k × 64 | 1M × 128 | 4M × 128 |
 |---|---|---|---|
-| BF16 | 1.00× | 1.26× | 1.80× |
-| INT8 | 1.20× | 1.35× | 1.94× |
-| FP8 | 1.08× | 1.31× | 1.66× |
+| BF16 | 0.97× | 1.42× | 2.05× |
+| INT8 | 1.16× | 1.36× | 1.84× |
+| FP8 | 1.00× | 1.43× | 1.89× |
 
 The split-K choice (below) does not affect training, whose batches are large.
 
 ### Findings
 
-- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 1.4× to
-  5.8× the time of BF16 here, more as the problem grows. Triton is still the faster FP32 path,
-  so it stays the automatic choice.
+- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 1.3× to
+  6.9× the time of BF16 here, more as the problem grows. Triton is still the faster FP32 path,
+  so it stays the automatic choice. Since v0.2.6 BF16 is also faster than INT8 and FP8 (next
+  finding but one).
 - **The NVIDIA-fitted tile settings are slow on RDNA4** (wave32): mostly from 128-row tiles at
   d > 128, and the stage count and tile shape on the full-row path (64 < d ≤ 128).
-- **INT8 and FP8 need their own settings even more.** With the NVIDIA-fitted settings for both,
+- **Cost-based revival changes the INT8/FP8 balance (v0.2.6).** Revival needs every training row's
+  second-nearest distance and its decoded value. With the second-nearest output, the FP8 and
+  INT8 kernels ran 1.7× to 2.3× slower under the v0.2 tables; two rules for that output hold up
+  from 2,048 to 262,144 rows (FP8 at 64 < d ≤ 128 from 8,192 rows: 1.46× to 2.31×; INT8 at
+  d ≤ 64 from 16,384 rows: 1.15× to 1.74×), the other candidates won only on large batches
+  (`tools/tune_assign.py --second`). Upstream computed the encoded rows' revival terms with
+  PyTorch scatter-adds (110 ms of GPU time in a 3-epoch INT8 run at 1M × 128, plus the
+  decoding); the fused kernel, which now also decodes the codes, takes 13 ms.
+- **INT8 and FP8 need their own settings even more** (v0.2 measurements, before cost-based
+  revival). With the NVIDIA-fitted settings for both,
   INT8 trained 0.83× to 1.27× as fast as BF16; with the tuned ones for both, 1.00× to 1.37×
   (same run as the tuning-gain table). The largest INT8 kernel gains
   (5× to 10×) are at d ≤ 64, where upstream pads every row to 128. One pipeline stage won on
@@ -197,7 +222,8 @@ refused, but upstream's NVIDIA inline assembly does not run correctly on AMD. Mo
 | Backend selection | `assignment_backend="auto"` picks Triton for FP32, FP16 and BF16 on the four families, so the default BF16 path works. Without Triton, auto falls back to PyTorch there (FP16/BF16 through `torch.addmm(out_dtype=)`, as explicit `native` already could upstream). The default FP32 → BF16 conversion is limited to the four families; other AMD GPUs keep FP32. CuTe and TMA descriptors are never selected on AMD. |
 | INT8 (v0.2) | INT8/UINT8 assignment on the four families' integer matrix instructions, with a per-family pipeline depth that fits in 64 KiB of LDS (upstream's three stages need up to 112 KiB outside gfx942). |
 | FP8 (v0.2) | FP8 (E4M3) assignment on the families with a native E4M3 matrix instruction, gfx950 and gfx120x. The scaled split's NVIDIA-only `libdevice.ldexp` is replaced on AMD by an exact power-of-two multiply (bit-identical to `torch.ldexp`). gfx942 and gfx11xx refuse FP8 with an error. |
-| Tuning | Per-family settings in `triton_assignment.py`, tuned on RDNA4: `_AMD_DIRECT_CONFIGS` (FP32, FP16/BF16, FP8), `_AMD_INT8_CONFIGS` with `_AMD_INT8_SMALL_CONFIGS` (batches up to 4,096 rows; 2,048 at d = 256), and `_AMD_SPLIT_K_MAX_ROW_BLOCKS`. gfx950 gets a cap to fit 64 KiB of LDS (`_AMD_DIRECT_CONFIGS["cdna4"]`, `_AMD_SPLIT_K_STAGES`). Other families keep the NVIDIA-fitted settings; `_direct_config` is the one place the launcher's choice is made. Gains are under Results. |
+| Upstream sync (v0.2.6) | faiss `b14b3d69` brought new PTX (revival statistics, the FP64 split step), now plain Triton arithmetic with fusion off (bit-equal to PyTorch on gfx1200); 12 new kernels checked for LDS (`tools/rocm_probe/lds_sweep.py`); an NVIDIA "SM90" batch-sum rule that also matched CDNA no longer does; NumPy fallbacks for three faiss C++ helpers missing from faiss-cpu 1.16.0; INT8/FP8 revival statistics in the fused Triton kernel, codes decoded there, instead of PyTorch scatter-adds. |
+| Tuning | Per-family settings in `triton_assignment.py`, tuned on RDNA4: `_AMD_DIRECT_CONFIGS` (FP32, FP16/BF16, FP8), `_AMD_INT8_CONFIGS` with `_AMD_INT8_SMALL_CONFIGS` (batches up to 4,096 rows; 2,048 at d = 256), `_AMD_SPLIT_K_MAX_ROW_BLOCKS`, and since v0.2.6 `_AMD_DIRECT_SECOND_CONFIGS` / `_AMD_INT8_SECOND_CONFIGS` for launches that also return the second-nearest distance. gfx950 gets a cap to fit 64 KiB of LDS (`_AMD_DIRECT_CONFIGS["cdna4"]`, `_AMD_SPLIT_K_STAGES`). Other families keep the NVIDIA-fitted settings; `_direct_config` is the one place the launcher's choice is made. Gains are under Results. |
 | Pre-flight checks (v0.2.2) | New `capabilities.py`: `supported(device, dtype, ...)` names the backend training would use, or `None` (`explain=True` adds the reason; v0.2.5: answers without torch installed); `memory_estimate(model, n, dtype, device)` bounds the GPU memory of `train`. New `check_finite=True` on `Emeans`/`QuantizedEmeans` raises on NaN or infinite input. Upstream has none of these. |
 | Graph replay | Training uses the eager loop on ROCm (same results, only speed differs); `EMEANS_ROCM_GRAPH_REPLAY=1` opts in to replay. |
 | Tests | Vendor-aware skips replace the ROCm skips; INT8 and FP8 tests run on AMD. New GPU-free tests: no inline assembly and `.rn` arithmetic (four AMD targets plus sm90), NVIDIA-only features fenced off, LDS fit of every launch configuration on four AMD targets, pinned launch configurations (NVIDIA unchanged), rule boundaries. New GPU tests: bit-level checks against PyTorch, the FP8 encodes included. One upstream IVF test made robust to OpenBLAS builds. |
@@ -348,6 +374,7 @@ and the way the fork was installed.
 | **v0.2.3** | `Emeans` refuses INT8/UINT8 rows on the GPU with an error naming `QuantizedEmeans` | **released** 2026-11-22 |
 | **v0.2.4** | Installable package `emeans-rocm` (import name `emeans_rocm`) on PyPI; users no longer need the symlink into faiss-cpu (development still uses it) | **released** 2026-11-23 |
 | **v0.2.5** | `supported()` and `memory_estimate()` answer without torch installed; `supported(..., explain=True)` gives the reason; a smaller wheel | **released** 2026-11-23 |
+| v0.2.6 | Synced with upstream faiss `b14b3d69` (cost-based revival by default, fractional epochs, IVF fine search); ROCm work for the new code; INT8/FP8 revival speed; CPU path on faiss-cpu 1.16.0 | in preparation |
 
 Not scheduled on either track:
 

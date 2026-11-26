@@ -34,7 +34,8 @@ def run_case(rows, d, k, precision, backend, epochs, repeat, no_tables=False):
         from faiss.contrib.e_means import triton_assignment as ta
         for table in (ta._AMD_DIRECT_CONFIGS, ta._AMD_INT8_CONFIGS,
                       ta._AMD_INT8_SMALL_CONFIGS, ta._AMD_SPLIT_K_MAX_ROW_BLOCKS,
-                      ta._AMD_SPLIT_K_STAGES):
+                      ta._AMD_SPLIT_K_STAGES, ta._AMD_DIRECT_SECOND_CONFIGS,
+                      ta._AMD_INT8_SECOND_CONFIGS):
             table.clear()
     from faiss.contrib.e_means import quantizer
     from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans

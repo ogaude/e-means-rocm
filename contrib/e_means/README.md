@@ -469,14 +469,14 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
 - ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
-  BF16 there: 1.4× to 5.8× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
-  conversion on these cards. Triton is still faster than PyTorch for native FP32 (1.6×
+  BF16 there: 1.3× to 6.9× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
+  conversion on these cards. Triton is still faster than PyTorch for native FP32 (2.0× to 2.6×
   measured), so it stays the automatic choice.
 - ⁴ AMD support in this fork (v0.1; INT8 and FP8 in v0.2) is validated on RX 9000. On an RX
   9060 XT (gfx1200, ROCm 10.1) every precision above trains, the e-means tests pass, and Triton
-  is 2.1× to 9.3× faster than PyTorch for BF16 and 2.0× to 8.9× for FP16 (200k × 64 to
-  4M × 128 vectors, more as the problem grows). RX 9000 GPUs use tile settings tuned for them,
-  which make the BF16/FP16 assignment kernel up to 3.5× faster and BF16 training up to 1.8×
+  is 2.8× to 15× faster than PyTorch for BF16 and 2.9× to 14× for FP16 (200k × 64 to
+  4M × 128 vectors, more as the problem grows; v0.2.6). RX 9000 GPUs use tile settings tuned for
+  them, which make the BF16/FP16 assignment kernel up to 3.5× faster and BF16 training up to 2.1×
   faster than the NVIDIA-fitted defaults (INT8 and FP8: see ⁵ and ⁶). MI300 validation and
   tuning are planned for v0.3; MI350 and RX 7000 are compile-checked only and use the
   NVIDIA-fitted tile settings.
@@ -487,14 +487,17 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   (gfx120x). MI300 and RX 7000 would only emulate it through FP16 (saving memory, not time) and
   refuse FP8 with an error. On an RX 9060 XT the FP8 tests pass, the encode gives exactly
   PyTorch's codes for every FP32 value up to 448 in magnitude, and training ends within 0.1% of
-  BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training is 1.13× to 1.37× faster
-  than BF16 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). MI350 is compile-checked
-  only and uses the NVIDIA-fitted settings.
+  BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training was 1.13× to 1.37× faster
+  than BF16 in v0.2 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). Since v0.2.6,
+  where cost-based revival is the default and needs each row's second-nearest distance, it runs at
+  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) gives back the v0.2 speed at
+  some cost in quality. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.6× to 10× faster than with the NVIDIA-fitted
-  settings, and INT8 training is 1.02× to 1.37× faster than BF16 (200k × 64 to 4M × 128 vectors,
-  1,024 to 16,384 centroids, final loss within 0.06% of BF16). Elsewhere the pipeline depth is set per
+  settings, and INT8 training was 1.02× to 1.37× faster than BF16 in v0.2 (200k × 64 to 4M × 128
+  vectors, 1,024 to 16,384 centroids, final loss within 0.06% of BF16); since v0.2.6 (cost-based
+  revival, see ⁵) it runs at 0.58× to 0.85× of BF16's speed, final loss within 0.05%. Elsewhere the pipeline depth is set per
   family so the kernel fits in 64 KiB of shared memory (upstream's setting needs up to 112 KiB
   outside MI300). MI300 is to be checked in the v0.3 cloud session; MI350 and RX 7000 are
   compile-checked only.
@@ -514,7 +517,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   clusterings. For identical runs, call `torch.use_deterministic_algorithms(True)` (verified on
   ROCm before the upstream b14b3d69 sync, eager and replay).
 - `assignment_backend="native"` (PyTorch) handles FP32, FP16 and BF16 on the four families, as on
-  NVIDIA SM80+; it is verified on gfx1200 and 2.0× to 9.3× slower than Triton for FP16/BF16,
+  NVIDIA SM80+; it is verified on gfx1200 and 2.8× to 15× slower than Triton for FP16/BF16,
   more as the problem grows.
 - Several GPUs (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are untested.
 
