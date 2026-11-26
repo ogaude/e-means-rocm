@@ -18,3 +18,4 @@ Notes:
 - `port.py` and `assign.py` read the e-means source as text and generate `ported_kernels.py` / `assign_kernels.py` next to themselves.
 - "error: could not allocate output register for constraint 'f'" printed by `probe.py` and `nv.py` is expected: it is the PTX snippet being compiled for an AMD target.
 - `probe.py` passes wavefront size 64 for every target; Triton overrides it to 32 on gfx10 and later, so results are unaffected.
+- `lds_sweep.py`: offline LDS check of the kernels added by the b14b3d69 sync, at the block sizes their launchers pick, for gfx942/gfx950/gfx1100/gfx1200 (no GPU; about 3 min on one core). The assignment kernels are checked by `tests/torch_test_e_means_launch_config.py`.

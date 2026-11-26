@@ -11,6 +11,7 @@
 #   * rule boundaries: INT8 small-batch rows and widths, the split-K row-block cap;
 #   * the Triton fallback of the AMD arch lookup.
 
+import itertools
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -55,6 +56,30 @@ def _compile(fn, signature, constexprs, arch, warps, stages):
                                        enable_fp_fusion=False))
 
 
+# Second-nearest outputs (cost-based revival, closing handover): off, distance, distance + label.
+# Each pointer is a constexpr None when its output is off, as at the launch sites.
+SECOND_VARIANTS = {"nearest": (False, False), "second": (True, False), "second+label": (True, True)}
+
+
+def _second_args(pointers, second, label, fp8, defer=None):
+    """Signature and constexpr entries for the second-output parameters.
+
+    pointers maps each parameter to (dtype, needs): needs is "second" or "label".
+    As at the launch sites, SECOND_LABEL is off for E4M3, but with a second distance
+    E4M3 always gets the label buffers (_launch_assignment allocates them).
+    """
+    buffers = label or (fp8 and second)
+    sig, cx = {}, dict(SECOND=second, SECOND_LABEL=label and not fp8)
+    if defer is not None:
+        cx["DEFER_SECOND_LABEL"] = defer
+    for name, (dtype, needs) in pointers.items():
+        if (second if needs == "second" else buffers):
+            sig[name] = dtype
+        else:
+            cx[name] = None
+    return sig, cx
+
+
 def _kinds(family):
     kinds = ["fp32", "bf16"]
     if dp._FAMILIES[family]["native_fp8"]:
@@ -70,16 +95,22 @@ class LdsBudgetTest(unittest.TestCase):
         for family, arch in ARCHS.items():
             budget = dp.profile_for_arch(arch).lds_bytes
             for kind in _kinds(family):
-                for d in WIDTHS:
+                for d, (variant, (second, label)) in itertools.product(
+                        WIDTHS, SECOND_VARIANTS.items()):
                     full_d, bb, bk, bd, warps, stages = ta._direct_config(
                         family, kind != "fp32", kind == "fp8", d)
                     cx = dict(BLOCK_B=bb, BLOCK_K=bk, BLOCK_D=bd, FULL_D=full_d,
                               REDUCED=kind != "fp32", FP16=False, FP8=kind == "fp8",
                               WIDE_CENTROID=False, x_desc=None, centroid_desc=None,
                               SPHERICAL=False)
+                    extra_sig, extra_cx = _second_args(
+                        dict(second_ptr=("*fp32", "second"), second_label_ptr=("*i32", "label"),
+                             pending_ptr=("*i32", "label")),
+                        second, label, kind == "fp8", defer=d <= ta._DEFER_SECOND_LABEL_MAX_D)
+                    cx.update(extra_cx)
                     sig = dict(ASSIGN_SIG, x_ptr="*" + DTYPE[kind],
-                               centroid_ptr="*" + DTYPE[kind])
-                    with self.subTest(arch=arch, kind=kind, d=d):
+                               centroid_ptr="*" + DTYPE[kind], **extra_sig)
+                    with self.subTest(arch=arch, kind=kind, d=d, outputs=variant):
                         kernel = _compile(ta._assign_kernel, sig, cx, arch, warps, stages)
                         self.assertLessEqual(kernel.metadata.shared, budget)
 
@@ -91,22 +122,37 @@ class LdsBudgetTest(unittest.TestCase):
                 if kind == "fp32":
                     continue  # split-K is reduced precision only
                 dtype = DTYPE[kind]
-                with self.subTest(arch=arch, kind=kind, kernel="split"):
-                    cx = dict(PARTITIONS=ta._SPLIT_K_MAX_PARTITIONS,
-                              BLOCK_B=ta._SPLIT_K_BLOCK_B, BLOCK_K=ta._SPLIT_K_BLOCK_K,
-                              BLOCK_D=ta._SPLIT_K_BLOCK_D, FP16=False, FP8=kind == "fp8",
-                              WIDE_CENTROID=False)
-                    sig = dict(SPLIT_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype)
-                    kernel = _compile(ta._assign_split_k_kernel, sig, cx, arch,
-                                      ta._SPLIT_K_NUM_WARPS, stages)
-                    self.assertLessEqual(kernel.metadata.shared, budget)
-                with self.subTest(arch=arch, kind=kind, kernel="reduce"):
-                    p = ta._SPLIT_K_MAX_PARTITIONS
-                    cx = dict(PARTITIONS=p, BLOCK_PARTITIONS=triton.next_power_of_2(p),
-                              BLOCK_D=128, FP16=False, FP8=kind == "fp8", SPHERICAL=False)
-                    sig = dict(REDUCE_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype)
-                    kernel = _compile(ta._reduce_split_k_kernel, sig, cx, arch, 4, 1)
-                    self.assertLessEqual(kernel.metadata.shared, budget)
+                fp8 = kind == "fp8"
+                for variant, (second, label) in SECOND_VARIANTS.items():
+                    with self.subTest(arch=arch, kind=kind, kernel="split", outputs=variant):
+                        cx = dict(PARTITIONS=ta._SPLIT_K_MAX_PARTITIONS,
+                                  BLOCK_B=ta._SPLIT_K_BLOCK_B, BLOCK_K=ta._SPLIT_K_BLOCK_K,
+                                  BLOCK_D=ta._SPLIT_K_BLOCK_D, FP16=False, FP8=fp8,
+                                  WIDE_CENTROID=False)
+                        extra_sig, extra_cx = _second_args(
+                            dict(partial_second_ptr=("*fp32", "second"),
+                                 partial_second_label_ptr=("*i32", "label"),
+                                 partial_pending_ptr=("*i32", "label")),
+                            second, label, fp8, defer=True)
+                        cx.update(extra_cx)
+                        sig = dict(SPLIT_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype, **extra_sig)
+                        kernel = _compile(ta._assign_split_k_kernel, sig, cx, arch,
+                                          ta._SPLIT_K_NUM_WARPS, stages)
+                        self.assertLessEqual(kernel.metadata.shared, budget)
+                    with self.subTest(arch=arch, kind=kind, kernel="reduce", outputs=variant):
+                        p = ta._SPLIT_K_MAX_PARTITIONS
+                        cx = dict(PARTITIONS=p, BLOCK_PARTITIONS=triton.next_power_of_2(p),
+                                  BLOCK_D=128, FP16=False, FP8=fp8, SPHERICAL=False)
+                        extra_sig, extra_cx = _second_args(
+                            dict(partial_second_ptr=("*fp32", "second"), second_ptr=("*fp32", "second"),
+                                 partial_second_label_ptr=("*i32", "label"),
+                                 second_label_ptr=("*i32", "label"),
+                                 partial_pending_ptr=("*i32", "label"), pending_ptr=("*i32", "label")),
+                            second, label, fp8)
+                        cx.update(extra_cx)
+                        sig = dict(REDUCE_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype, **extra_sig)
+                        kernel = _compile(ta._reduce_split_k_kernel, sig, cx, arch, 4, 1)
+                        self.assertLessEqual(kernel.metadata.shared, budget)
 
 
 @unittest.skipUnless(HAVE_TRITON, "triton not installed")
