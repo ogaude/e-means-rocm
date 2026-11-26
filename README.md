@@ -4,13 +4,12 @@ AMD GPU (ROCm) support for [e-means](https://github.com/ogaude/e-means-rocm/blob
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.5 released (tag `e-means-rocm-v0.2.5`) for RX 9000 (gfx1200), installable with
-> `pip install emeans-rocm`. v0.2.6 (synced with upstream faiss `b14b3d69`) is in preparation on
-> this branch. MI300X follows in v0.3.**
+> **Status: v0.2.6 released (tag `e-means-rocm-v0.2.6`) for RX 9000 (gfx1200), installable with
+> `pip install emeans-rocm`; synced with upstream faiss `b14b3d69`. MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16; INT8/UINT8 and FP8 through `QuantizedEmeans`), the whole e-means test suite passes,
 > and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.8× to 15× faster than
-> PyTorch for BF16, the fastest format here (INT8 and FP8 train at 0.58× to 0.85× of BF16's speed
+> PyTorch for BF16; BF16 and FP16 are the fastest formats here (INT8 and FP8 train at 0.58× to 0.85× of BF16's speed
 > since cost-based revival, v0.2.6; see Results). MI300X
 > (gfx942) is planned for v0.3; MI350 (gfx950) and RX 7000 (gfx11xx) are compile-checked only.
 > **NVIDIA has not been re-run on hardware** (see Known limitations).
@@ -130,14 +129,15 @@ Final losses: FP16 and FP32 within 0.01% of BF16, INT8 within 0.05%, FP8 within 
 **Compared with v0.2.5** (its tables from 2026-11-20; a run of v0.2.5 on 2026-11-26 reproduced
 them within 1.2% at 1M × 128): BF16 and FP16 train 1.3× to 1.9× faster at the two larger shapes,
 and 0.88× (BF16) and 0.95× (FP16) as fast at 200k × 64.
-The gain comes with cost-based revival: with revival off, BF16 at 1M × 128 is back at v0.2.5's
-time, and the revival path sums each batch in one fused Triton kernel. INT8 and FP8 now train
+The gain comes from the revival path, which sums each batch in one fused Triton kernel; with
+revival off (`unused_threshold=0`), BF16 at 1M × 128 takes 0.235 s, v0.2.5's time. INT8 and FP8 now train
 slower than BF16 (in v0.2.5 they were 1.0× to 1.4× faster), because revival also needs each
 row's second-nearest distance and its decoded values. Right after the sync they were 2.2× to
-2.6× slower than in v0.2.5 (at 1M × 128); this release brings that to 1.2× to 1.6× (fused
-revival statistics, codes decoded in the kernel, launch rules for the second-nearest output).
-At 1M × 128, `unused_threshold=0` turns revival off and gives v0.2.5's INT8/FP8 times back
-(0.200 s and 0.176 s), at a cost in quality: the training objective rose by about 0.9%.
+2.6× slower than in v0.2.5 at 1M × 128; this release brings that to 1.2× there (1.2× to 1.6×
+across the three shapes, the most at 200k × 64) with fused revival statistics, codes decoded in
+the kernel, and launch rules for the second-nearest output. At 1M × 128, `unused_threshold=0`
+turns revival off and nearly gives back v0.2.5's INT8/FP8 times (0.200 s and 0.176 s against
+0.193 s and 0.169 s), at a cost in quality: the training objective rose by about 0.9%.
 
 ### What the RDNA4 tuning gains
 
@@ -176,13 +176,13 @@ The split-K choice (below) does not affect training, whose batches are large.
 - **Cost-based revival changes the INT8/FP8 balance (v0.2.6).** Revival needs every training row's
   second-nearest distance and its decoded value. With the second-nearest output, the FP8 and
   INT8 kernels ran 1.4× to 2.3× slower under the v0.2 tables (d = 64 and 128, k = 4,096). Two
-  rules for that output hold up wherever they apply between 2,048 and 262,144 rows, measured
-  at d = 128 for FP8 (rule: 64 < d ≤ 128 from 8,192 rows, 1.46× to 2.31×) and at d = 64 for
-  INT8 (rule: d ≤ 64 from 16,384 rows, 1.15× to 1.74×); the other candidates won only on large
-  batches (`tools/tune_assign.py --second`). Upstream computed the encoded rows' revival terms
+  rules for that output win at every batch size they cover (timed from 2,048 to 262,144 rows,
+  k = 1,024 and 16,384): FP8 for 64 < d ≤ 128 from 8,192 rows (1.46× to 2.31×, measured at
+  d = 128) and INT8 for d ≤ 64 from 16,384 rows (1.15× to 1.74×, measured at d = 64); the other
+  candidates won only on large batches (`tools/tune_assign.py --second`). Upstream computed the encoded rows' revival terms
   with PyTorch scatter-adds (110 ms of GPU time in a 3-epoch INT8 run at 1M × 128, plus the
-  decoding); the fused kernels, which now also decode the codes, take 7.5 ms (INT8) and 9 ms
-  (FP8), most of it the axis update.
+  decoding); the fused kernels, which now also decode the codes, take 7.5 ms (INT8) and 8.9 ms
+  (FP8), of which 5.7 ms and 5.3 ms are the EMA update of the axes (`_removal_update_kernel`).
 - **INT8 and FP8 need their own settings even more** (v0.2 measurements, before cost-based
   revival). With the NVIDIA-fitted settings for both,
   INT8 trained 0.83× to 1.27× as fast as BF16; with the tuned ones for both, 1.00× to 1.37×
@@ -258,9 +258,12 @@ Supported data per GPU and the converters are in the kernel table of the
 - **Several GPUs** (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are
   untested until v0.5; their tests stay skipped on ROCm.
 - **Training is not always bit-reproducible by default**, on AMD as upstream on NVIDIA. Since the
-  upstream b14b3d69 sync, FP32/BF16 batch sums at d ≥ 128 use a segmented reduction without
-  atomics (not yet measured on AMD); other paths, including every d < 128, sum with atomic
-  additions, so two identical runs can end in different clusterings.
+  upstream b14b3d69 sync, with the Triton backend and cluster revival on (the default, cost-based or
+  mass-based), floating-point batch sums are added from label-sorted rows without atomics, up to
+  d = 4,096 and batches of 2^24 rows; with revival off (`unused_threshold=0`), FP32/BF16 sums at d ≥ 128 use a segmented
+  reduction without atomics. Other paths (revival off at d < 128, d > 4,096, encoded rows) may
+  sum with atomic additions, so repeated runs can end in different clusterings. None of this is
+  measured on AMD yet.
   `torch.use_deterministic_algorithms(True)` makes runs identical, eager and with graph replay
   (verified before the sync).
 
@@ -341,8 +344,8 @@ GitHub Actions has no GPU, so CI runs the GPU-free part of the suite; GPU runs s
   torch on Python 3.10 to 3.14 (Triton compile checks skip), and the package job: build,
   `tools/check_dist.py`, `twine check`, the package without torch, and the tests against the
   installed package.
-  A lint job runs ruff's pyflakes rules (undefined names, redefinitions; unused imports only
-  in `tools/`, since the other folders mirror faiss). Locally: `ruff check .`.
+  A lint job runs ruff's pyflakes rules (undefined names, redefinitions; unused imports and
+  variables only in `tools/`, since the other folders mirror faiss). Locally: `ruff check .`.
 - `ci-rocm-stack.yml`, weekly and on demand: the GPU-free tests on AMD's ROCm torch and Triton
   (about 6.6 GB installed), which adds the Triton compile checks for the four AMD targets.
 
@@ -377,7 +380,7 @@ and the way the fork was installed.
 | **v0.2.3** | `Emeans` refuses INT8/UINT8 rows on the GPU with an error naming `QuantizedEmeans` | **released** 2026-11-22 |
 | **v0.2.4** | Installable package `emeans-rocm` (import name `emeans_rocm`) on PyPI; users no longer need the symlink into faiss-cpu (development still uses it) | **released** 2026-11-23 |
 | **v0.2.5** | `supported()` and `memory_estimate()` answer without torch installed; `supported(..., explain=True)` gives the reason; a smaller wheel | **released** 2026-11-23 |
-| v0.2.6 | Synced with upstream faiss `b14b3d69` (cost-based revival by default, fractional epochs, IVF fine search); ROCm work for the new code; INT8/FP8 revival speed; CPU path on faiss-cpu 1.16.0 | in preparation |
+| **v0.2.6** | Synced with upstream faiss `b14b3d69` (cost-based revival by default, fractional epochs, BF16 IVF training and two-nearest IVF search); ROCm work for the new code; INT8/FP8 revival speed; CPU path on faiss-cpu 1.16.0 | **released** 2026-11-26 |
 
 Not scheduled on either track:
 
@@ -398,6 +401,24 @@ Not scheduled on either track:
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.6 (2026-11-26, tag `e-means-rocm-v0.2.6`)**: synced with upstream faiss `b14b3d69`
+(2026-11-25). From upstream: cost-based cluster revival is the default (`unused_threshold=None`;
+a number keeps mass-based revival, `0` turns revival off), so the same seed and data give
+different centroids than v0.2.5; fractional epochs (`nepochs=1.6`), whose last pass also
+reassigns the rows of clusters split during it, so the returned labels match the final centroids
+(see Cluster revival in the [e-means README](https://github.com/ogaude/e-means-rocm/blob/main/contrib/e_means/README.md));
+BF16 IVF training and a two-nearest IVF search. For ROCm: the new upstream PTX (revival statistics, the FP64 split
+step) is plain Triton arithmetic, bit-equal to PyTorch on gfx1200; the 12 new kernels fit 64 KiB
+of LDS on the four families; an NVIDIA "SM90" rule no longer matches CDNA; `NumpyEmeans` runs on
+faiss-cpu 1.16.0, which lacks three C++ helpers upstream now calls (NumPy fallbacks). Speed on an
+RX 9060 XT: BF16/FP16 train 1.3× to 1.9× faster than in v0.2.5 at 1M and 4M rows (0.88× and
+0.95× as fast at 200k × 64); INT8 and FP8 train at 0.58× to 0.85× of BF16's speed, because
+revival needs each row's second-nearest distance and decoded value. Right after the sync they
+were 2.2× to 2.6× slower than in v0.2.5 at 1M × 128; fused revival statistics with in-kernel
+decoding and two launch rules for the second-nearest output bring that to 1.2× there (1.2× to
+1.6× across the three shapes; see Results). Tests: 385 passed and 88
+skipped on gfx1200 (graph replay also passes); GitHub CI passes, including the ROCm-stack run.
 
 **v0.2.5 (2026-11-23, tag `e-means-rocm-v0.2.5`)**: `supported()` and `memory_estimate()` answer
 without PyTorch installed, for example on a CPU-only machine that only uses `NumpyEmeans`:

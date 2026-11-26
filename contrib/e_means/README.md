@@ -490,8 +490,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training was 1.13× to 1.37× faster
   than BF16 in v0.2 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). Since v0.2.6,
   where cost-based revival is the default and needs each row's second-nearest distance, it runs at
-  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) gives back the v0.2 speed
-  (measured at 1M × 128) at some cost in quality. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
+  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) nearly gives back the v0.2
+  speed (0.176 s against 0.169 s at 1M × 128), with a training objective about 0.9% higher. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.6× to 10× faster than with the NVIDIA-fitted
@@ -511,11 +511,13 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - Training uses the plain (eager) loop on AMD, not CUDA-graph replay. Results are the same, only
   speed differs. Replay works on the RX 9060 XT but gave no measurable speed-up there, so it is
   opt-in: set `EMEANS_ROCM_GRAPH_REPLAY=1`.
-- Determinism follows the CUDA rule above: with the Triton backend, FP32/BF16 batch sums at
-  d ≥ 128 take the segmented-reduction path (no atomics; not yet measured on AMD); other paths,
-  including every d < 128, sum with atomic additions, so repeated runs can end in different
-  clusterings. For identical runs, call `torch.use_deterministic_algorithms(True)` (verified on
-  ROCm before the upstream b14b3d69 sync, eager and replay).
+- Determinism: with the Triton backend and cluster revival on (the default, cost-based or
+  mass-based), floating-point batch sums are added from label-sorted rows without atomics, up to
+  d = 4,096 and batches of 2^24 rows; with revival off (`unused_threshold=0`), FP32/BF16 sums at d ≥ 128 use a segmented
+  reduction without atomics. Other paths (revival off at d < 128, d > 4,096, encoded rows) may
+  sum with atomic additions, so repeated runs can end in different clusterings. None of this is
+  measured on AMD yet. For identical runs, call `torch.use_deterministic_algorithms(True)`
+  (verified on ROCm before the upstream b14b3d69 sync, eager and replay).
 - `assignment_backend="native"` (PyTorch) handles FP32, FP16 and BF16 on the four families, as on
   NVIDIA SM80+; it is verified on gfx1200 and 2.8× to 15× slower than Triton for FP16/BF16,
   more as the problem grows.

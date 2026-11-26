@@ -14,7 +14,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "emeans-rocm"
-version = "0.2.6.dev0"
+version = "0.2.6"
 description = "E-means mini-batch k-means from faiss contrib, with AMD ROCm GPU support through Triton"
 readme = "README.md"
 license = "MIT"
