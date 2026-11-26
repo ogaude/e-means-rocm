@@ -7,7 +7,8 @@ own check in tests/torch_test_e_means_launch_config.py.
 
     ROCR_VISIBLE_DEVICES= nice -n 19 python tools/rocm_probe/lds_sweep.py [--arch gfx1200]
 
-Types mirror the launch sites (triton_assignment.py, ivf_fine.py). Exit status 1 if a
+Types follow the launch sites (triton_assignment.py, ivf_fine.py); where a dtype depends on the
+input (row dtype, index widths) the common or widest case is used. Exit status 1 if a
 configuration is over budget or fails to compile.
 """
 import argparse
@@ -70,12 +71,12 @@ def cases():
         scal = P32 if scalars else "fp32"
         common = dict(BLOCK_R=br, BLOCK_D=np2(d), EMA=ema, SCALARS=scalars, LONG=ta._LONG_SEGMENT)
         yield ("_removal_stats_kernel", ta._removal_stats_kernel,
-               dict(rows=P32, order=I64P, offsets=I16P, distance=P32, second=P32, axes=P32,
+               dict(rows=P32, order=I64P, offsets=I64P, distance=P32, second=P32, axes=P32,
                     centroids=P32, stats=P32, removal=P32, d="i32", row_stride="i64",
                     stats_stride="i64", removal_stride="i64", alpha=scal, decay=scal),
                common, warps, 1, "d=%d ema=%d scalars=%d" % (d, ema, scalars))
         yield ("_long_pieces_kernel", ta._long_pieces_kernel,
-               dict(rows=P32, order=I64P, offsets=I16P, sorted_labels=I16P, partial=P32, counter=I32P,
+               dict(rows=P32, order=I64P, offsets=I64P, sorted_labels=I16P, partial=P32, counter=I32P,
                     distance=P32, second=P32, axes=P32, centroids=P32, stats=P32, removal=P32,
                     d="i32", n="i32", row_stride="i64", stats_stride="i64", removal_stride="i64",
                     alpha=scal, decay=scal),
@@ -84,7 +85,7 @@ def cases():
     for d, dtype, long_batch in itertools.product(widths, ("fp32", "bf16"), (False, True)):
         br, warps = segment_config(d, long_batch)
         yield ("_segment_sums_kernel", ta._segment_sums_kernel,
-               dict(rows="*" + dtype, order=I64P, offsets=I16P, sorted_labels=I16P, partial=P32,
+               dict(rows="*" + dtype, order=I64P, offsets=I64P, sorted_labels=I16P, partial=P32,
                     counter=I32P, stats=P32, d="i32", n="i32", pieces="i32", row_stride="i64",
                     stats_stride="i64"),
                dict(BLOCK_R=br, BLOCK_D=np2(d), LONG=ta._LONG_SEGMENT), warps, 1,

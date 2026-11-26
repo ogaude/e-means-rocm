@@ -64,16 +64,18 @@ SECOND_VARIANTS = {"nearest": (False, False), "second": (True, False), "second+l
 def _second_args(pointers, second, label, fp8, defer=None):
     """Signature and constexpr entries for the second-output parameters.
 
-    pointers maps each parameter to (dtype, needs): needs is "second" or "label".
-    As at the launch sites, SECOND_LABEL is off for E4M3, but with a second distance
-    E4M3 always gets the label buffers (_launch_assignment allocates them).
+    pointers maps each parameter to (dtype, needs): "second" (the second distance),
+    "buffer" (the second-label buffers) or "caller" (pending, allocated only when the caller
+    asks for second labels). As in _launch_assignment, SECOND_LABEL is off for E4M3, but
+    with a second distance E4M3 always gets the label buffers; pending is allocated
+    before that, so it stays None unless the caller asked.
     """
     buffers = label or (fp8 and second)
     sig, cx = {}, dict(SECOND=second, SECOND_LABEL=label and not fp8)
     if defer is not None:
         cx["DEFER_SECOND_LABEL"] = defer
     for name, (dtype, needs) in pointers.items():
-        if (second if needs == "second" else buffers):
+        if {"second": second, "buffer": buffers, "caller": label}[needs]:
             sig[name] = dtype
         else:
             cx[name] = None
@@ -104,8 +106,8 @@ class LdsBudgetTest(unittest.TestCase):
                               WIDE_CENTROID=False, x_desc=None, centroid_desc=None,
                               SPHERICAL=False)
                     extra_sig, extra_cx = _second_args(
-                        dict(second_ptr=("*fp32", "second"), second_label_ptr=("*i32", "label"),
-                             pending_ptr=("*i32", "label")),
+                        dict(second_ptr=("*fp32", "second"), second_label_ptr=("*i32", "buffer"),
+                             pending_ptr=("*i32", "caller")),
                         second, label, kind == "fp8", defer=d <= ta._DEFER_SECOND_LABEL_MAX_D)
                     cx.update(extra_cx)
                     sig = dict(ASSIGN_SIG, x_ptr="*" + DTYPE[kind],
@@ -131,8 +133,8 @@ class LdsBudgetTest(unittest.TestCase):
                                   WIDE_CENTROID=False)
                         extra_sig, extra_cx = _second_args(
                             dict(partial_second_ptr=("*fp32", "second"),
-                                 partial_second_label_ptr=("*i32", "label"),
-                                 partial_pending_ptr=("*i32", "label")),
+                                 partial_second_label_ptr=("*i32", "buffer"),
+                                 partial_pending_ptr=("*i32", "buffer")),
                             second, label, fp8, defer=True)
                         cx.update(extra_cx)
                         sig = dict(SPLIT_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype, **extra_sig)
@@ -145,9 +147,9 @@ class LdsBudgetTest(unittest.TestCase):
                                   BLOCK_D=128, FP16=False, FP8=fp8, SPHERICAL=False)
                         extra_sig, extra_cx = _second_args(
                             dict(partial_second_ptr=("*fp32", "second"), second_ptr=("*fp32", "second"),
-                                 partial_second_label_ptr=("*i32", "label"),
-                                 second_label_ptr=("*i32", "label"),
-                                 partial_pending_ptr=("*i32", "label"), pending_ptr=("*i32", "label")),
+                                 partial_second_label_ptr=("*i32", "buffer"),
+                                 second_label_ptr=("*i32", "buffer"),
+                                 partial_pending_ptr=("*i32", "buffer"), pending_ptr=("*i32", "caller")),
                             second, label, fp8)
                         cx.update(extra_cx)
                         sig = dict(REDUCE_SIG, x_ptr="*" + dtype, centroid_ptr="*" + dtype, **extra_sig)

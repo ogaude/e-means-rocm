@@ -158,6 +158,24 @@ class PtxFreeKernelsTest(unittest.TestCase):
                                 if not _on_axis_step(lines, line)}
                     self.assertEqual(dict(hits), {})
 
+    def test_axis_step_fp64_is_ieee_on_amd(self):
+        # Upstream's PTX spelled div.rn.f64 / sqrt.rn.f64. On AMD the plain FP64 "/" must
+        # lower to the correctly rounded div_scale/div_fmas/div_fixup sequence, and the
+        # square root to llvm.sqrt.f64 without fast-math flags (LLVM then expands it
+        # with correct rounding; an afn flag would allow the bare v_rsq_f64 estimate).
+        sqrt_call = re.compile(r"call ([^@]*)@llvm\.sqrt\.f64")
+        for arch in AMD_ARCHS:
+            with self.subTest(arch=arch):
+                kernel = _compile(ta._write_float_splits_kernel, SPLIT_SIG,
+                                  SPLIT_CASES["fp32, axes"], arch)
+                asm, llir = kernel.asm["amdgcn"], kernel.asm["llir"]
+                for op in ("v_div_scale_f64", "v_div_fmas_f64", "v_div_fixup_f64"):
+                    self.assertIn(op, asm)
+                flags = sqrt_call.findall(llir)
+                self.assertTrue(flags, "expected an llvm.sqrt.f64 call")
+                for prefix in flags:
+                    self.assertNotRegex(prefix, r"\b(afn|fast|reassoc|arcp)\b")
+
     def test_fp8_cast_kernel_compiles(self):
         for arch in AMD_ARCHS:
             for label, constexprs in CAST_CASES.items():
