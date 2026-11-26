@@ -171,8 +171,7 @@ class TestEmeansRecipe(unittest.TestCase):
         self.assertEqual(km.recipe["batch_law"], "quality")
         self.assertEqual(km.recipe["batch_law_requested"], "auto")
         self.assertEqual(km.recipe["batch_law_reason"], "d <= 16")
-        self.assertEqual(km.recipe["unused_threshold"], 0.0)
-        self.assertEqual(km.n_splits, 0)
+        self.assertIsNone(km.recipe["unused_threshold"])
         quality, _ = _resolve_recipe(2048, 4, 2, "quality", None, None)
         self.assertEqual(km.recipe["batch_size"], quality)
 
@@ -181,7 +180,7 @@ class TestEmeansRecipe(unittest.TestCase):
         km.train(x)
         self.assertEqual(km.recipe["batch_law"], "throughput")
         self.assertEqual(km.recipe["batch_law_reason"], "requested")
-        self.assertEqual(km.recipe["unused_threshold"], 0.1)
+        self.assertIsNone(km.recipe["unused_threshold"])
         throughput, _ = _resolve_recipe(2048, 4, 2, "throughput", None, None)
         self.assertEqual(km.recipe["batch_size"], throughput)
 
@@ -428,13 +427,147 @@ assert 'torch' not in sys.modules
         on_fifth.train(x, init_centroids=init)
         self.assertEqual(on_fifth.n_splits, 1)
 
+    def test_removal_cost_keeps_far_blob_and_revives_dead(self):
+        rs = np.random.RandomState(0)
+        x = np.vstack([rs.randn(4000, 4), rs.randn(40, 4) + 20]).astype("float32")
+        init = np.vstack([x[:2], x[-1:], np.full((1, 4), -50)]).astype("float32")
+        for threshold, far_kept in ((None, True), (0.1, False)):
+            centroids, _ = Emeans(4, 4, nepochs=3, unused_threshold=threshold).train(x, init)
+            self.assertEqual(np.abs(centroids - 20).max(axis=1).min() < 1, far_kept)
+            self.assertLess(np.abs(centroids).max(), 30)  # the dead centroid moved
+
+    def test_removal_moves_every_candidate(self):
+        centers = np.array([[0.], [1.], [-2.], [10.]], dtype="float32")
+        model = Emeans(1, 4, nepochs=1, batch_size=4)
+        model.begin(4, centers)
+        sources, victims = model._choose_removal_splits(
+            np.array([1., 100., 0., 100.]), np.ones(4), np.array([1., 3., 2., 4.]))
+        np.testing.assert_array_equal(victims, [2, 0])  # cheapest first, neighbours included
+        np.testing.assert_array_equal(sources, [3, 1])
+
+    def test_removal_moves_only_pairs_that_pay(self):
+        # A pair moves only if (2/pi)|U_donor| > R_candidate, or R_candidate <= 0.
+        centers = np.array([[0.], [.1], [5.], [10.], [20.], [30.]], dtype="float32")
+        model = Emeans(1, 6, nepochs=1, batch_size=6)
+        model.begin(6, centers)
+        removal = np.array([1., 2., 100., 100., 100., 100.])
+        sources, victims = model._choose_removal_splits(
+            removal, np.ones(6), np.array([1., 1., 10., 2., 1., 1.]))
+        np.testing.assert_array_equal(victims, [0])  # 2/pi*2 < 2: the second pair stays
+        np.testing.assert_array_equal(sources, [2])
+        sources, victims = model._choose_removal_splits(
+            np.array([0., 2., 100., 100., 100., 100.]), np.ones(6),
+            np.array([1., 1., .1, .1, 1., 1.]))
+        np.testing.assert_array_equal(victims, [0])  # dead candidates always move
+        np.testing.assert_array_equal(sources, [4])
+        sources, victims = model._choose_removal_splits(removal, np.ones(6), np.ones(6))
+        self.assertIsNone(sources)  # no split pays for a removal
+        self.assertIsNone(victims)
+
+    def test_revival_checks_continue_through_the_last_pass(self):
+        # Exact first means give zero split gain; later wide donor rows pay.
+        # Follow the resolved partial-first/full-last recipe in the caller API.
+        init = np.array([[0.], [1.], [10.], [30.]], dtype="float32")
+        late = np.array([[27.], [30.], [33.]], dtype="float32")
+        km, done, moved = Emeans(1, 4, nepochs=1.6, batch_size=10, alpha0=.5), [], []
+        km.begin(100, init)
+        choose, apply = km._choose_splits, km._apply_splits
+
+        def rows_seen():
+            return sum(km.recipe["epoch_rows"][:km._epoch]) + km._epoch_rows
+
+        def record(rng):
+            done.append(rows_seen())
+            return choose(rng)
+
+        def record_moves(source, target):
+            norm = km._axis_scale * np.linalg.norm(km._removal_stats[source, :-1].astype("float64"), axis=1)
+            gain = (2 / np.pi) * norm.astype("float32").astype("float64")
+            cost = km._removal_stats[target, -1].astype("float64")
+            self.assertTrue(np.all((cost <= 0) | (gain > cost)))
+            moved.append(rows_seen())
+            return apply(source, target)
+
+        km._choose_splits, km._apply_splits = record, record_moves
+        for pattern in (init, late):
+            while km._epoch_rows < km.recipe["epoch_rows"][km._epoch]:
+                size = min(km.recipe["batch_size"], km.recipe["epoch_rows"][km._epoch] - km._epoch_rows)
+                rows = np.tile(pattern, (size // len(pattern) + 1, 1))[:size]
+                km.update(km.accumulate(rows))
+            km.end_epoch()
+        self.assertTrue(np.isfinite(km.finalize()).all())
+        self.assertGreater(max(done), 100)
+        self.assertTrue(moved)
+        self.assertGreater(max(moved), 100)  # A real profitable split, not just a late check.
+
+    def test_centroid_moved_while_closing_closes_from_its_final_rows(self):
+        rs = np.random.RandomState(0)
+        x = np.vstack([rs.randn(4000, 4), rs.randn(40, 4) + 20]).astype("float32")
+        init = np.vstack([x[:2], x[-1:], np.full((1, 4), -50)]).astype("float32")
+        km, state = Emeans(4, 4, nepochs=1), {}
+        finish = km._handover_finish
+
+        def capture(order, rows):
+            state["splits"], state["rows"] = len(km._handover["events"]), order[:rows].copy()
+            return finish(order, rows)
+
+        km._handover_finish = capture
+        centroids, labels = km.train(x, init)
+        self.assertGreater(state["splits"], 0)
+        rows = state["rows"]
+        for j in range(4):  # Every centroid with last-pass rows returns their mean.
+            mine = rows[labels[rows] == j]
+            if len(mine):
+                np.testing.assert_allclose(centroids[j], x[mine].mean(axis=0), rtol=1e-5, atol=1e-5)
+
+    def test_rows_of_centroid_revived_while_closing_take_second_nearest(self):
+        rs = np.random.RandomState(0)
+        x = ((rs.randn(64, 8) * 4)[rs.randint(0, 64, 20000)] + rs.randn(20000, 8)).astype("float32")
+        init = x[rs.choice(len(x), 64, replace=False)]
+        km, state = Emeans(8, 64, nepochs=1, batch_size=500), {}
+
+        def handover_finish(order, rows, finish=km._handover_finish):
+            state["before"] = km._handover["labels"].copy()
+            return finish(order, rows)
+
+        km._handover_finish = handover_finish
+        centroids, labels = km.train(x, init)
+        self.assertEqual(km.recipe["closing_handover"], "second_nearest")
+        self.assertGreater(km.closing_handover_stats["second"], 0)
+        self.assertGreater((labels != state["before"]).sum(), 0)
+
+        def closing(lab):
+            out = centroids.copy()
+            for j in np.flatnonzero(np.bincount(lab, minlength=64) > 0):
+                out[j] = x[lab == j].mean(0)
+            return out
+
+        # Every centroid closes at the mean of its final rows.
+        np.testing.assert_allclose(centroids, closing(labels), rtol=1e-4, atol=1e-4)
+        # The same run without the handover: labels before it, means over them.
+        before = closing(state["before"])
+        error = ((x - centroids[labels]) ** 2).sum(1).mean()
+        self.assertLess(error, ((x - before[state["before"]]) ** 2).sum(1).mean())
+
+    def test_first_batch_is_not_the_init_draw(self):
+        # Seed 0's pass 0 reused the init seed, so its first batch held every init row.
+        self.assertNotEqual(_epoch_seed(0, 0), 0)
+        x = np.random.RandomState(3).randn(20000, 4).astype("float32")
+        km, batches = Emeans(4, 200, nepochs=2, seed=0), []
+        accumulate = km._accumulate
+        km._accumulate = lambda x, rows, *args: batches.append(rows) or accumulate(x, rows, *args)
+        km.train(x)
+        init = np.random.RandomState(0).permutation(len(x))[:200]
+        # An unrelated order shares about 1 of the 128 first rows; the init order shared all 128.
+        self.assertLess(len(np.intersect1d(init, batches[0])), 10)
+
     def test_revival_follows_current_batch_update(self):
         seed = 7
         order = np.random.RandomState(_epoch_seed(seed, 0)).permutation(5)
         x = np.zeros((5, 1), dtype="float32")
         x[order[-1]] = 10.0
         init = np.array([[0.0], [10.0]], dtype="float32")
-        km = Emeans(1, 2, nepochs=1, batch_size=1, alpha0=0.5, seed=seed)
+        km = Emeans(1, 2, nepochs=1, batch_size=1, alpha0=0.5, seed=seed, unused_threshold=0.1)
 
         km.train(x, init_centroids=init)
 
