@@ -124,19 +124,38 @@ class TritonNumericsTest(unittest.TestCase):
         target = torch.arange(k // 2, k // 2 * 2, device=dev, dtype=torch.int64)
         return centroids, usage, source, target
 
-    def test_split_matches_torch(self):
-        from faiss.contrib.e_means.base import _SPLIT_EPSILON
+    def _split_axes(self, k, d):
+        # Unit axes and FP64 |U| as cost-based revival keeps them, plus the edge cases the
+        # kernel must treat as "no offset" (zero, infinite and NaN norms).
+        dev = self.device
+        axes = torch.randn(k, d, generator=self.g, device=dev)
+        axes /= axes.norm(dim=1, keepdim=True)
+        norm = (torch.rand(k, generator=self.g, device=dev).double() * 50) ** 2
+        norm[: min(k, 4)] = torch.tensor([0.0, float("inf"), float("nan"), 1e-300],
+                                         device=dev, dtype=torch.float64)[: min(k, 4)]
+        return axes.contiguous(), norm.contiguous()
 
+    def test_split_matches_torch(self):
+        # Upstream b14b3d69 replaced the epsilon split by c -/+ s u along the cluster axis
+        # (cost-based revival); its FP64 step was PTX, now plain FP64 Triton operations.
         for dtype in (None, torch.float32, torch.bfloat16):
             for k, d in ((64, 129), (16, 1024), (8, 1)):
-                for epsilon in (_SPLIT_EPSILON, 2.0 ** -10, 2.0 ** -24):
-                    with self.subTest(dtype=dtype, k=k, d=d, epsilon=epsilon):
+                for with_axes in (False, True):
+                    with self.subTest(dtype=dtype, k=k, d=d, axes=with_axes):
                         c, u, source, target = self._split_state(k, d)
+                        axes, norm = self._split_axes(k, d) if with_axes else (None, None)
                         c_ref, u_ref = c.clone(), u.clone()
-                        ran = ta._write_float_splits(c, u, source, target, dtype, epsilon)
+                        ran = ta._write_float_splits(c, u, source, target, dtype, axes, norm)
                         self.assertTrue(ran, "Triton split kernel fell back to PyTorch")
-                        TorchBackend(4096).split(c_ref, u_ref, source, target, dtype, epsilon)
+                        TorchBackend(4096).split(c_ref, u_ref, source, target, dtype, axes, norm)
                         torch.cuda.synchronize()
+                        if not with_axes:
+                            # Upstream: without axes the kernel keeps the donor value
+                            # (low = high = c), while TorchBackend.split computes c + 0.0,
+                            # which turns a -0.0 donor into +0.0 (on NVIDIA as well). Only the
+                            # sign of a zero may differ; it changes no distance.
+                            zero = (c == 0) & (c_ref == 0)
+                            c, c_ref = c.masked_fill(zero, 0.0), c_ref.masked_fill(zero, 0.0)
                         _bits_equal(self, c, c_ref, "centroids")
                         _bits_equal(self, u, u_ref, "usage")
 

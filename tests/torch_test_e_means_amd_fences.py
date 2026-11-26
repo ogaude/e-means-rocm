@@ -101,8 +101,12 @@ class ImpreciseAccHintTest(unittest.TestCase):
     SIG = dict(x_ptr="*fp8e4nv", centroid_ptr="*fp8e4nv", centroid_norm_ptr="*fp32",
                distance_ptr="*fp32", label_ptr="*i64", B="i32", K="i32", D="i32",
                stride_xb="i64", stride_xd="i64", stride_ck="i64", stride_cd="i64")
+    # Nearest only: the second-output parameters (upstream b14b3d69) off, as constexprs.
+    SECOND_OFF = dict(second_ptr=None, SECOND=False, second_label_ptr=None, SECOND_LABEL=False,
+                      pending_ptr=None, DEFER_SECOND_LABEL=True)
     CX = dict(BLOCK_B=64, BLOCK_K=256, BLOCK_D=64, FULL_D=False, REDUCED=True, FP16=False,
-              FP8=True, WIDE_CENTROID=False, x_desc=None, centroid_desc=None, SPHERICAL=False)
+              FP8=True, WIDE_CENTROID=False, x_desc=None, centroid_desc=None, SPHERICAL=False,
+              **SECOND_OFF)
 
     def _streams(self, modules, target, asm_key, pattern):
         import triton
@@ -211,7 +215,8 @@ class AmdTuningTableTest(unittest.TestCase):
             cx = dict(BLOCK_B=block_b, BLOCK_K=block_k,
                       BLOCK_D=triton.next_power_of_2(d) if full else block_d, FULL_D=full,
                       REDUCED=kind != "fp32", FP16=False, FP8=kind == "fp8", WIDE_CENTROID=False,
-                      x_desc=None, centroid_desc=None, SPHERICAL=False)
+                      x_desc=None, centroid_desc=None, SPHERICAL=False,
+                      **ImpreciseAccHintTest.SECOND_OFF)
             s.update({name: "constexpr" for name in cx})
             with self.subTest(kind=kind, d=d):
                 kernel = triton.compile(

@@ -11,6 +11,7 @@
 #   * the kernel uses the family's integer matrix instruction (MFMA i8 / WMMA iu8);
 #   * NVIDIA keeps the upstream launch configuration.
 
+import itertools
 import re
 import unittest
 
@@ -37,14 +38,19 @@ SIGNATURE = dict(x_ptr="*i8", centroid_ptr="*i8", centroid_norm_ptr="*i32",
 
 
 def _compile(arch, physical_d, num_stages=None, unsigned=False, packed=True,
-             config=None):
+             config=None, second=False):
     family = profile_for_arch(arch).family
     full_d, block_b, block_k, block_d, num_warps, stages = (
         config or ta._int8_launch_config)(physical_d, family)
     constexprs = dict(UNSIGNED=unsigned, BLOCK_B=block_b, BLOCK_K=block_k, BLOCK_D=block_d,
                       WIDE_CENTROID=False, FULL_D=full_d, PACKED=packed,
-                      x_desc=None, centroid_desc=None)
-    signature = dict(SIGNATURE, **{name: "constexpr" for name in constexprs})
+                      x_desc=None, centroid_desc=None, SECOND=second)
+    # Second distance and labels (cost-based revival, upstream b14b3d69): pointers when on,
+    # constexpr None when off, as assign_int8_rows passes them.
+    extra = dict(second_ptr="*fp32", second_label_ptr="*i64") if second else {}
+    if not second:
+        constexprs.update(second_ptr=None, second_label_ptr=None)
+    signature = dict(SIGNATURE, **extra, **{name: "constexpr" for name in constexprs})
     return triton.compile(
         ASTSource(fn=ta._assign_int8_kernel, signature=signature, constexprs=constexprs),
         target=GPUTarget("hip", arch, 32 if arch.startswith("gfx1") else 64),
@@ -63,12 +69,12 @@ class Int8LaunchConfigTest(unittest.TestCase):
         for family, arch in ARCHS.items():
             budget = profile_for_arch(arch).lds_bytes
             for path, physical_d in PATHS.items():
-                for unsigned in (False, True):
-                    for packed in (True, False):
+                for unsigned, packed, second in itertools.product(
+                        (False, True), (True, False), (False, True)):
                         with self.subTest(arch=arch, path=path, unsigned=unsigned,
-                                          packed=packed):
+                                          packed=packed, second=second):
                             kernel = _compile(arch, physical_d, unsigned=unsigned,
-                                              packed=packed)
+                                              packed=packed, second=second)
                             self.assertLessEqual(kernel.metadata.shared, budget)
                             self.assertTrue(MATRIX.search(kernel.asm["amdgcn"]),
                                             "no integer matrix instruction")
