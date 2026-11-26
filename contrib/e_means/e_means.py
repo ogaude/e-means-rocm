@@ -91,6 +91,54 @@ def _add_rows_at(out, labels, rows):
         out[touched] = result
 
 
+# e-means-rocm: faiss-cpu releases up to 1.16.0 lack the three C++ helpers upstream
+# e-means added in #5915 (faiss/utils/distances.h). Call them when the installed faiss
+# has them, otherwise compute the same thing in NumPy: cluster sums add each cluster's
+# rows in increasing row order in FP32, as the C++ does; removal terms and axes follow
+# its definitions (the inner product's summation order may differ in the last bits).
+
+def _accumulate_cluster_sums(d, rows, labels, sums):
+    """sums[a, :d] += rows[i] and sums[a, d] += 1 for a = labels[i], in row order."""
+    if hasattr(faiss, "accumulate_cluster_sums"):
+        faiss.accumulate_cluster_sums(d, len(rows), len(sums), *map(
+            faiss.swig_ptr, (rows, labels, sums)))
+        return
+    _add_rows_at(sums[:, :d], labels, rows)
+    np.add.at(sums[:, d], labels, np.float32(1))
+
+
+def _accumulate_removal_stats(d, rows, labels, d1, d2, centroids, axes, stats):
+    """stats[a, :d] += p y and stats[a, d] += d2 - d1 (0 if not finite), with
+    a = labels[i], y = rows[i] - centroids[a], p = <y, axes[a]>, in row order."""
+    if hasattr(faiss, "accumulate_removal_stats"):
+        faiss.accumulate_removal_stats(d, len(rows), len(stats), *map(
+            faiss.swig_ptr, (rows, labels, d1, d2, centroids, axes, stats)))
+        return
+    y = rows - centroids[labels]
+    p = np.einsum("ij,ij->i", y, axes[labels])
+    _add_rows_at(stats[:, :d], labels, p[:, None] * y)
+    with np.errstate(invalid="ignore", over="ignore"):
+        margin = d2 - d1
+    margin[~np.isfinite(margin)] = 0
+    np.add.at(stats[:, d], labels, margin)
+
+
+def _update_removal_axes(d, ids, weight, batch, axis, axes):
+    """For a in ids: axis[a, :d] += weight * batch[a, :d]; axes[a] = u / |u| where
+    |u| > 0 (norm in FP64); batch[a] is zeroed. ids are distinct."""
+    if hasattr(faiss, "update_removal_axes"):
+        faiss.update_removal_axes(d, len(ids), faiss.swig_ptr(ids), weight, *map(
+            faiss.swig_ptr, (batch, axis, axes)))
+        return
+    u = axis[ids, :d] + np.float32(weight) * batch[ids, :d]
+    axis[ids, :d] = u
+    wide = u.astype(np.float64)
+    norm = np.sqrt((wide * wide).sum(1))
+    live = norm > 0
+    axes[ids[live]] = (wide[live] / norm[live, None]).astype(np.float32)
+    batch[ids] = 0
+
+
 def _separate_splits(donor, child):
     """Separate identical donor and child centroids along one coordinate.
 
@@ -584,10 +632,9 @@ class NumpyEmeans(_EmeansBase):
             if track:
                 # Keep the contiguous copy referenced: swig_ptr does not own it.
                 nearest = np.ascontiguousarray(distance)
-                faiss.accumulate_removal_stats(
-                    self.d, len(rows), self.k, *map(faiss.swig_ptr, (
-                        rows, labels, nearest, nearest if second is None else second,
-                        centroids, self._axes, self._batch_removal)))
+                _accumulate_removal_stats(
+                    self.d, rows, labels, nearest, nearest if second is None else second,
+                    centroids, self._axes, self._batch_removal)
             if captured_labels is not None:
                 captured_labels[begin:end] = labels
             if self.spherical:
@@ -596,8 +643,7 @@ class NumpyEmeans(_EmeansBase):
             if accumulation.dtype == np.float32:
                 if len(labels) and labels.min() < 0:
                     raise ValueError("faiss found no nearest centroid for some rows")
-                faiss.accumulate_cluster_sums(self.d, len(rows), self.k, *map(
-                    faiss.swig_ptr, (rows, labels, accumulation)))
+                _accumulate_cluster_sums(self.d, rows, labels, accumulation)
             else:
                 counts += np.bincount(labels, minlength=self.k)
                 _add_rows_at(sums, labels, rows)
@@ -660,9 +706,7 @@ class NumpyEmeans(_EmeansBase):
             touched = np.flatnonzero(counts)
             if ids is not None:
                 touched = ids[touched]
-            faiss.update_removal_axes(
-                d, len(touched), faiss.swig_ptr(touched), alpha / scale, *map(faiss.swig_ptr, (
-                    self._batch_removal, stats, self._axes)))
+            _update_removal_axes(d, touched, alpha / scale, self._batch_removal, stats, self._axes)
         if ids is None:
             self._pass_counts += counts
             if self._pass_sums is not None:
