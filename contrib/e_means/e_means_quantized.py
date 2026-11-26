@@ -14,6 +14,7 @@ from .e_means_torch import (
 )
 
 from .torch_backend import (
+    TritonBackend,
     _get_triton_assign_rows,
     _check_torch_abs_bound,
     _separate_splits,
@@ -40,6 +41,27 @@ def statistics_values(rows, codes, quantizer, *, code_units=False):
     if quantizer is not None:
         return quantizer.decode(codes)
     return rows
+
+
+def _fused_removal_rows(model, values, labels, margin):
+    """e-means-rocm: add the decoded rows' [p y | margin] terms with the fused Triton kernel.
+
+    Same terms as _accumulate_removal_rows (margin's NaN and +inf count as 0, -inf as
+    -FLT_MAX), summed per centroid in row order instead of by index_add_: the encoded path's
+    PyTorch scatter-add made INT8/FP8 training about 2x slower than before cost-based revival.
+    margin None adds only p y (mass-based revival). [x | 1] is not touched: the caller sums
+    it exactly from the codes. False when the Triton kernel cannot take these rows (the
+    caller then uses _accumulate_removal_rows).
+    """
+    backend = model._execution_backend
+    if not (values.is_cuda and isinstance(backend, TritonBackend)
+            and _same_operation(backend.accumulate_removal, TritonBackend.accumulate_removal, backend)):
+        return False
+    zero = values.new_zeros(len(values), dtype=torch.float32)
+    gap = zero if margin is None else margin.float()
+    return bool(backend.accumulate_removal(
+        values, labels, None, zero, gap, model._axes, model._readout(), model._batch_removal,
+        add_stats=False))
 
 
 def _assign_cost_rows(model, rows, centroids, centroid_norm):
@@ -552,7 +574,9 @@ class QuantizedEmeans(Emeans):
                 distance, labels = self._assign_rows(rows, centroids, centroid_norm)
             codes = statistics_codes(rows, centroids, self._assignment_backend, q, second=removal)
             if removal:
-                _accumulate_removal_rows(self, self._statistics_rows(codes), labels, margin)
+                values = self._statistics_rows(codes)
+                if not _fused_removal_rows(self, values, labels, margin):
+                    _accumulate_removal_rows(self, values, labels, margin)
             if captured_labels is not None:
                 captured_labels[begin:end] = labels
             if self.spherical:
@@ -561,9 +585,11 @@ class QuantizedEmeans(Emeans):
             if self._removal_stats is not None and not removal:
                 # Mass-based revival reads only U (p y, y = x - c); R stays 0.
                 codes = statistics_codes(rows, centroids, self._assignment_backend, q)
-                y = statistics_values(rows, codes, q).float() - self._readout()[labels]
-                p = (y * self._axes[labels]).sum(1, keepdim=True)
-                self._batch_removal.index_add_(0, labels, torch.cat((p * y, torch.zeros_like(p)), dim=1))
+                values = statistics_values(rows, codes, q).float()
+                if not _fused_removal_rows(self, values, labels, None):
+                    y = values - self._readout()[labels]
+                    p = (y * self._axes[labels]).sum(1, keepdim=True)
+                    self._batch_removal.index_add_(0, labels, torch.cat((p * y, torch.zeros_like(p)), dim=1))
             if (
                 native_stats
                 and rows.dtype == x.dtype

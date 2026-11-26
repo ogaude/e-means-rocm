@@ -2177,7 +2177,10 @@ def assign_rows(x, centroids, centroid_norm, *, spherical=False, return_score=Fa
 @triton.jit
 def _removal_stats_kernel(rows, order, offsets, distance, second, axes, centroids, stats, removal, d,
                           row_stride, stats_stride, removal_stride, alpha, decay, BLOCK_R: tl.constexpr,
-                          BLOCK_D: tl.constexpr, EMA: tl.constexpr, SCALARS: tl.constexpr, LONG: tl.constexpr):
+                          BLOCK_D: tl.constexpr, EMA: tl.constexpr, SCALARS: tl.constexpr, LONG: tl.constexpr,
+                          STATS: tl.constexpr = True):
+    # STATS=False (e-means-rocm): removal terms only, for callers whose [x | 1] sums come from
+    # elsewhere (encoded rows, summed exactly from their codes).
     # Centroid j owns its segment of label-sorted rows (one read of each row, no atomics) and
     # adds [x | 1] to stats and [p y | d2 - d1] to removal, y = x - c, p = y.v; with EMA, removal is
     # the EMA itself: [U | R] <- decay [U | R] + alpha (0 + this batch), V <- U / |U| where |U| > 0,
@@ -2206,9 +2209,10 @@ def _removal_stats_kernel(rows, order, offsets, distance, second, axes, centroid
             gap = tl.load(second + row, mask=rmask, other=0.0) - tl.load(distance + row, mask=rmask, other=0.0)
             gap = tl.where(gap == float("-inf"), -3.4028234663852886e38, gap)  # as nan_to_num(0, 0)
             margin += tl.where(rmask & (gap == gap) & (gap < float("inf")), gap, 0.0)
-        out = stats + j * stats_stride
-        tl.store(out + col, tl.load(out + col, mask=cmask) + total, mask=cmask)
-        tl.store(out + d, tl.load(out + d) + (end - start).to(tl.float32))
+        if STATS:
+            out = stats + j * stats_stride
+            tl.store(out + col, tl.load(out + col, mask=cmask) + total, mask=cmask)
+            tl.store(out + d, tl.load(out + d) + (end - start).to(tl.float32))
         if not EMA:
             out = removal + j * removal_stride
             tl.store(out + col, tl.load(out + col, mask=cmask) + oja, mask=cmask)
@@ -2228,15 +2232,20 @@ def _removal_stats_kernel(rows, order, offsets, distance, second, axes, centroid
 
 
 def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, removal, ema=None,
-                       statistics_rows=None):
+                       statistics_rows=None, add_stats=True):
     """Add [x | 1] to FP32 stats and [p y | d2 - d1] to removal by label (y = x - centroids,
     p = y.axes), deterministically, from label-sorted rows.
 
     ema = (state, alpha, decay), only for a batch accumulated in this one call into a zero `removal` table
     (left untouched): removal_update's EMA is applied to state and axes, and the result is "folded" (up to
-    d = 2048; above, True and removal_update as usual). alpha and decay are floats or 0-d tensors."""
+    d = 2048; above, True and removal_update as usual). alpha and decay are floats or 0-d tensors.
+
+    add_stats=False (e-means-rocm) adds only the removal terms; stats may then be None. Used for
+    decoded encoded rows, whose [x | 1] sums the caller takes exactly from the codes."""
     if statistics_rows is not None:
         rows = statistics_rows
+    if not add_stats:
+        stats = removal  # shape and stride checks only; the kernels then never write it
     k, width = stats.shape
     fits = not (not rows.is_cuda or not rows.dtype.is_floating_point or rows.stride(1) != 1 or width > 4097
                 or width != rows.shape[1] + 1 or stats.stride(1) != 1 or removal.stride(1) != 1
@@ -2260,14 +2269,14 @@ def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, r
         _removal_stats_kernel[(k,)](
             rows, order, offsets, distance, second, axes, centroids, stats, state, rows.shape[1],
             rows.stride(0), stats.stride(0), state.stride(0), alpha, decay, BLOCK_R=block_r,
-            BLOCK_D=block_d, EMA=fold, SCALARS=scalars, LONG=_LONG_SEGMENT, num_warps=warps,
+            BLOCK_D=block_d, EMA=fold, SCALARS=scalars, LONG=_LONG_SEGMENT, STATS=add_stats, num_warps=warps,
             enable_fp_fusion=False)
         pieces, partial, counter = _pieces(rows, stats, 2 * block_d + 1)
         _long_pieces_kernel[(pieces,)](
             rows, order, offsets, sorted_labels, partial, counter, distance, second, axes, centroids, stats, state,
             rows.shape[1], len(rows), rows.stride(0), stats.stride(0), state.stride(0), alpha, decay,
-            BLOCK_R=block_r, BLOCK_D=block_d, LONG=_LONG_SEGMENT, EMA=fold, SCALARS=scalars, num_warps=warps,
-            enable_fp_fusion=False)
+            BLOCK_R=block_r, BLOCK_D=block_d, LONG=_LONG_SEGMENT, EMA=fold, SCALARS=scalars, STATS=add_stats,
+            num_warps=warps, enable_fp_fusion=False)
         torch.autograd.graph.increment_version((stats, state, axes) if fold else (stats, removal))
         return "folded" if fold else True
 
@@ -2349,7 +2358,8 @@ def removal_split(stats, axes, source, target, count):
 def _long_pieces(rows, order, offsets, sorted_labels, partial, counter, stats, d, n, row_stride, stats_stride,
                  BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr, LONG: tl.constexpr,
                  distance=None, second=None, axes=None, centroids=None, removal=None, removal_stride=0,
-                 alpha=0.0, decay=0.0, REMOVAL: tl.constexpr = False, EMA: tl.constexpr = False):
+                 alpha=0.0, decay=0.0, REMOVAL: tl.constexpr = False, EMA: tl.constexpr = False,
+                 STATS: tl.constexpr = True):
     # Program q takes the pieces of segments longer than LONG in label-sorted rows q LONG..(q + 1) LONG (the
     # first and last segments there); the last of a segment's pieces adds them up in row order and flushes them
     # as the per-centroid programs would: deterministic.
@@ -2406,9 +2416,10 @@ def _long_pieces(rows, order, offsets, sorted_labels, partial, counter, stats, d
                     if REMOVAL:
                         oja += tl.load(slot + BLOCK_D + col)
                         gaps += tl.load(slot + 2 * BLOCK_D)
-                out = stats + j * stats_stride
-                tl.store(out + col, tl.load(out + col, mask=cmask) + total, mask=cmask)
-                tl.store(out + d, tl.load(out + d) + (end - start).to(tl.float32))
+                if STATS:
+                    out = stats + j * stats_stride
+                    tl.store(out + col, tl.load(out + col, mask=cmask) + total, mask=cmask)
+                    tl.store(out + d, tl.load(out + d) + (end - start).to(tl.float32))
                 if REMOVAL:
                     out = removal + j * removal_stride
                     if EMA:
@@ -2427,7 +2438,7 @@ def _long_pieces(rows, order, offsets, sorted_labels, partial, counter, stats, d
 def _long_pieces_kernel(rows, order, offsets, sorted_labels, partial, counter, distance, second, axes, centroids,
                         stats, removal, d, n, row_stride, stats_stride, removal_stride, alpha, decay,
                         BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr, LONG: tl.constexpr, EMA: tl.constexpr,
-                        SCALARS: tl.constexpr):
+                        SCALARS: tl.constexpr, STATS: tl.constexpr = True):
     # accumulate_removal's long segments, in a launch of their own: inside _removal_stats_kernel, _long_pieces'
     # registers would cost the per-centroid programs occupancy.
     if EMA:
@@ -2435,7 +2446,8 @@ def _long_pieces_kernel(rows, order, offsets, sorted_labels, partial, counter, d
             alpha = tl.load(alpha)
             decay = tl.load(decay)
     _long_pieces(rows, order, offsets, sorted_labels, partial, counter, stats, d, n, row_stride, stats_stride, BLOCK_R,
-                 BLOCK_D, LONG, distance, second, axes, centroids, removal, removal_stride, alpha, decay, True, EMA)
+                 BLOCK_D, LONG, distance, second, axes, centroids, removal, removal_stride, alpha, decay, True, EMA,
+                 STATS)
 
 
 _LONG_SEGMENT = 256  # rows; longer segments are summed in pieces (no single-program tail)
