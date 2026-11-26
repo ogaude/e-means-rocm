@@ -508,9 +508,11 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - Training uses the plain (eager) loop on AMD, not CUDA-graph replay. Results are the same, only
   speed differs. Replay works on the RX 9060 XT but gave no measurable speed-up there, so it is
   opt-in: set `EMEANS_ROCM_GRAPH_REPLAY=1`.
-- As on NVIDIA, training is not bit-reproducible by default: batch statistics are summed with
-  atomic additions, so repeated FP32 runs can end in different clusterings. For identical runs,
-  call `torch.use_deterministic_algorithms(True)` (verified on ROCm, eager and replay).
+- Determinism follows the CUDA rule above: with the Triton backend, FP32/BF16 batch sums at
+  d ≥ 128 take the segmented-reduction path (no atomics; not yet measured on AMD); other paths,
+  including every d < 128, sum with atomic additions, so repeated runs can end in different
+  clusterings. For identical runs, call `torch.use_deterministic_algorithms(True)` (verified on
+  ROCm before the upstream b14b3d69 sync, eager and replay).
 - `assignment_backend="native"` (PyTorch) handles FP32, FP16 and BF16 on the four families, as on
   NVIDIA SM80+; it is verified on gfx1200 and 2.0× to 9.3× slower than Triton for FP16/BF16,
   more as the problem grows.

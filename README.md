@@ -228,10 +228,12 @@ Supported data per GPU and the converters are in the kernel table of the
   kernels; the bit-level numerics tests have only run on AMD.
 - **Several GPUs** (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are
   untested until v0.5; their tests stay skipped on ROCm.
-- **Training is not bit-reproducible by default**, on AMD as upstream on NVIDIA: batch
-  statistics are summed with atomic additions, so two identical FP32 runs can end in different
-  clusterings. `torch.use_deterministic_algorithms(True)` makes runs identical, eager and with
-  graph replay.
+- **Training is not always bit-reproducible by default**, on AMD as upstream on NVIDIA. Since the
+  upstream b14b3d69 sync, FP32/BF16 batch sums at d ≥ 128 use a segmented reduction without
+  atomics (not yet measured on AMD); other paths, including every d < 128, sum with atomic
+  additions, so two identical runs can end in different clusterings.
+  `torch.use_deterministic_algorithms(True)` makes runs identical, eager and with graph replay
+  (verified before the sync).
 
 ## Development
 
