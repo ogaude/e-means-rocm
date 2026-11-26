@@ -490,8 +490,8 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training was 1.13× to 1.37× faster
   than BF16 in v0.2 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). Since v0.2.6,
   where cost-based revival is the default and needs each row's second-nearest distance, it runs at
-  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) gives back the v0.2 speed at
-  some cost in quality. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
+  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) gives back the v0.2 speed
+  (measured at 1M × 128) at some cost in quality. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.6× to 10× faster than with the NVIDIA-fitted

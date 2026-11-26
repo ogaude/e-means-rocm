@@ -128,7 +128,8 @@ computed from the unrounded times.
 Final losses: FP16 and FP32 within 0.01% of BF16, INT8 within 0.05%, FP8 within 0.08%.
 
 **Compared with v0.2.5** (its tables from 2026-11-20; a run of v0.2.5 on 2026-11-26 reproduced
-them within 1% at 1M × 128): BF16 and FP16 train 1.3× to 1.9× faster at the two larger shapes.
+them within 1.2% at 1M × 128): BF16 and FP16 train 1.3× to 1.9× faster at the two larger shapes,
+and 0.88× (BF16) and 0.95× (FP16) as fast at 200k × 64.
 The gain comes with cost-based revival: with revival off, BF16 at 1M × 128 is back at v0.2.5's
 time, and the revival path sums each batch in one fused Triton kernel. INT8 and FP8 now train
 slower than BF16 (in v0.2.5 they were 1.0× to 1.4× faster), because revival also needs each
@@ -160,7 +161,7 @@ second-output rules below):
 |---|---|---|---|
 | BF16 | 0.97× | 1.42× | 2.05× |
 | INT8 | 1.16× | 1.36× | 1.84× |
-| FP8 | 1.00× | 1.43× | 1.89× |
+| FP8 | 0.99× | 1.43× | 1.89× |
 
 The split-K choice (below) does not affect training, whose batches are large.
 
@@ -174,12 +175,14 @@ The split-K choice (below) does not affect training, whose batches are large.
   d > 128, and the stage count and tile shape on the full-row path (64 < d ≤ 128).
 - **Cost-based revival changes the INT8/FP8 balance (v0.2.6).** Revival needs every training row's
   second-nearest distance and its decoded value. With the second-nearest output, the FP8 and
-  INT8 kernels ran 1.7× to 2.3× slower under the v0.2 tables; two rules for that output hold up
-  from 2,048 to 262,144 rows (FP8 at 64 < d ≤ 128 from 8,192 rows: 1.46× to 2.31×; INT8 at
-  d ≤ 64 from 16,384 rows: 1.15× to 1.74×), the other candidates won only on large batches
-  (`tools/tune_assign.py --second`). Upstream computed the encoded rows' revival terms with
-  PyTorch scatter-adds (110 ms of GPU time in a 3-epoch INT8 run at 1M × 128, plus the
-  decoding); the fused kernel, which now also decodes the codes, takes 13 ms.
+  INT8 kernels ran 1.4× to 2.3× slower under the v0.2 tables (d = 64 and 128, k = 4,096). Two
+  rules for that output hold up wherever they apply between 2,048 and 262,144 rows, measured
+  at d = 128 for FP8 (rule: 64 < d ≤ 128 from 8,192 rows, 1.46× to 2.31×) and at d = 64 for
+  INT8 (rule: d ≤ 64 from 16,384 rows, 1.15× to 1.74×); the other candidates won only on large
+  batches (`tools/tune_assign.py --second`). Upstream computed the encoded rows' revival terms
+  with PyTorch scatter-adds (110 ms of GPU time in a 3-epoch INT8 run at 1M × 128, plus the
+  decoding); the fused kernels, which now also decode the codes, take 7.5 ms (INT8) and 9 ms
+  (FP8), most of it the axis update.
 - **INT8 and FP8 need their own settings even more** (v0.2 measurements, before cost-based
   revival). With the NVIDIA-fitted settings for both,
   INT8 trained 0.83× to 1.27× as fast as BF16; with the tuned ones for both, 1.00× to 1.37×
