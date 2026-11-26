@@ -96,6 +96,9 @@ def _add_rows_at(out, labels, rows):
 # has them, otherwise compute the same thing in NumPy: cluster sums add each cluster's
 # rows in increasing row order in FP32, as the C++ does; removal terms and axes follow
 # its definitions (the inner product's summation order may differ in the last bits).
+# The NumPy path works in pieces of _FALLBACK_ROWS rows, so its temporaries stay small
+# (the C++ allocates none) while each cluster's rows are still added in row order.
+_FALLBACK_ROWS = 8192
 
 def _accumulate_cluster_sums(d, rows, labels, sums):
     """sums[a, :d] += rows[i] and sums[a, d] += 1 for a = labels[i], in row order."""
@@ -103,7 +106,9 @@ def _accumulate_cluster_sums(d, rows, labels, sums):
         faiss.accumulate_cluster_sums(d, len(rows), len(sums), *map(
             faiss.swig_ptr, (rows, labels, sums)))
         return
-    _add_rows_at(sums[:, :d], labels, rows)
+    for begin in range(0, len(rows), _FALLBACK_ROWS):
+        piece = slice(begin, begin + _FALLBACK_ROWS)
+        _add_rows_at(sums[:, :d], labels[piece], rows[piece])
     np.add.at(sums[:, d], labels, np.float32(1))
 
 
@@ -114,9 +119,11 @@ def _accumulate_removal_stats(d, rows, labels, d1, d2, centroids, axes, stats):
         faiss.accumulate_removal_stats(d, len(rows), len(stats), *map(
             faiss.swig_ptr, (rows, labels, d1, d2, centroids, axes, stats)))
         return
-    y = rows - centroids[labels]
-    p = np.einsum("ij,ij->i", y, axes[labels])
-    _add_rows_at(stats[:, :d], labels, p[:, None] * y)
+    for begin in range(0, len(rows), _FALLBACK_ROWS):
+        piece = slice(begin, begin + _FALLBACK_ROWS)
+        y = rows[piece] - centroids[labels[piece]]
+        p = np.einsum("ij,ij->i", y, axes[labels[piece]])
+        _add_rows_at(stats[:, :d], labels[piece], p[:, None] * y)
     with np.errstate(invalid="ignore", over="ignore"):
         margin = d2 - d1
     margin[~np.isfinite(margin)] = 0
