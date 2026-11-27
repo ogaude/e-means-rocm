@@ -1848,7 +1848,8 @@ def accumulate_bytes(rows, labels, stats, *, fp8_code_units=False, shift=False):
     shift subtracts 128 from UINT8 when 255*n could exceed INT32.
     Finite native FP16 remains lattice-safe.
     These lattices never reach FP32 subnormals. The caller excludes quantizers
-    and deterministic mode.
+    and deterministic mode, except stock Int8Quantizer codes (exact integer sums,
+    decoded once per batch by QuantizedEmeans), whose order does not matter.
     Opt-in finite E4M3 code units require a zeroed table and whole-batch n<=2**24;
     FP32 RN sums have unspecified addition order, while counts remain exact.
     """
