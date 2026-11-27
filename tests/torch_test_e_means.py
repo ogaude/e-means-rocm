@@ -2697,6 +2697,30 @@ if cuda_supported:
                     torch.testing.assert_close(runs[0][0], runs[1][0], rtol=0, atol=0)
                     torch.testing.assert_close(runs[0][1], runs[1][1], rtol=0, atol=0)
 
+    @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
+    def test_fp8_quantizer_training_is_bit_identical_by_default(self):
+        # e-means-rocm: stock Fp8Quantizer sums E4M3 code units from label-sorted rows (no
+        # atomics), so two runs repeat bit for bit without deterministic mode.
+        generator = torch.Generator().manual_seed(13)
+        n, d, k = 120_000, 96, 64
+        means = torch.randn(k, d, generator=generator) * 4
+        rows = means[torch.randint(k, (n,), generator=generator)]
+        rows = (rows + torch.randn(n, d, generator=generator)).cuda()
+        q = Fp8Quantizer(d)
+        q.train(rows)
+        codes = q.compute_codes(rows)
+        self.assertFalse(torch.are_deterministic_algorithms_enabled())
+        for revival in (None, 0.1):
+            with self.subTest(unused_threshold=revival):
+                runs = []
+                for _ in range(2):
+                    model = QuantizedEmeans(d, k, nepochs=3, seed=5, quantizer=q, capture_assignments=True,
+                                            assignment_backend="triton", unused_threshold=revival)
+                    centroids, labels = model.train(codes)
+                    runs.append((centroids.clone(), labels.clone()))
+                torch.testing.assert_close(runs[0][0], runs[1][0], rtol=0, atol=0)
+                torch.testing.assert_close(runs[0][1], runs[1][1], rtol=0, atol=0)
+
     @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_int8_code_sums_match_decoded_row_sums(self):
         # One batch: the code-sum statistics equal the decoded rows' sums (FP64 reference)

@@ -636,9 +636,10 @@ class QuantizedEmeans(Emeans):
                 continue
             # CuTe FP8 assignment retains these encoded rows for statistics;
             # consume them on the ordered stream before another assignment.
-            if fp8_stats and accumulate_bytes(
-                codes, labels, accumulation, fp8_code_units=True
-            ):
+            # e-means-rocm: E4M3 code units from label-sorted rows (no atomics, fixed order; 1.9x at
+            # 1M x 128), else the atomic byte kernel (d > 4,096).
+            if fp8_stats and (accumulate_segments(codes, labels, accumulation)
+                              or accumulate_bytes(codes, labels, accumulation, fp8_code_units=True)):
                 continue
             # Label-sorted segment sums, else the atomic byte kernel (d > 4,096): both add exact
             # integers, so they give the same bits; the segments avoid colliding atomics (2x at 1M x 128).
