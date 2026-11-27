@@ -64,7 +64,7 @@ def _fused_removal_rows(model, values, labels, margin):
         add_stats=False))
 
 
-def _fused_code_removal(model, codes, labels, margin):
+def _fused_code_removal(model, codes, labels, margin, segments_out=None):
     """e-means-rocm: as _fused_removal_rows, but decode stock INT8 / E4M3 codes in the kernel.
 
     Int8Quantizer and Fp8Quantizer decode as ldexp(code, e) (+ shift); the kernel computes
@@ -86,7 +86,8 @@ def _fused_code_removal(model, codes, labels, margin):
     gap = zero if margin is None else margin.float()
     return bool(backend.accumulate_removal(
         codes, labels, None, zero, gap, model._axes, model._readout(), model._batch_removal,
-        add_stats=False, decode=(q._decode_exponent, q.shift)))
+        add_stats=False, decode=(q._decode_exponent, q.shift),
+        **({"segments_out": segments_out} if segments_out is not None else {})))
 
 
 def _assign_cost_rows(model, rows, centroids, centroid_norm):
@@ -610,7 +611,9 @@ class QuantizedEmeans(Emeans):
             else:
                 distance, labels = self._assign_rows(rows, centroids, centroid_norm)
             codes = statistics_codes(rows, centroids, self._assignment_backend, q, second=removal)
-            if removal and not _fused_code_removal(self, codes, labels, margin):
+            # e-means-rocm: the revival statistics' label sort, reused by the batch sums below.
+            segments = []
+            if removal and not _fused_code_removal(self, codes, labels, margin, segments):
                 values = self._statistics_rows(codes)
                 if not _fused_removal_rows(self, values, labels, margin):
                     _accumulate_removal_rows(self, values, labels, margin)
@@ -622,7 +625,7 @@ class QuantizedEmeans(Emeans):
             if self._removal_stats is not None and not removal:
                 # Mass-based revival reads only U (p y, y = x - c); R stays 0.
                 codes = statistics_codes(rows, centroids, self._assignment_backend, q)
-                values = None if _fused_code_removal(self, codes, labels, None) else (
+                values = None if _fused_code_removal(self, codes, labels, None, segments) else (
                     statistics_values(rows, codes, q).float())
                 if values is not None and not _fused_removal_rows(self, values, labels, None):
                     y = values - self._readout()[labels]
@@ -638,12 +641,13 @@ class QuantizedEmeans(Emeans):
             # consume them on the ordered stream before another assignment.
             # e-means-rocm: E4M3 code units from label-sorted rows (no atomics, fixed order; 1.9x at
             # 1M x 128), else the atomic byte kernel (d > 4,096).
-            if fp8_stats and (accumulate_segments(codes, labels, accumulation)
+            shared = segments[0] if segments else None
+            if fp8_stats and (accumulate_segments(codes, labels, accumulation, shared)
                               or accumulate_bytes(codes, labels, accumulation, fp8_code_units=True)):
                 continue
             # Label-sorted segment sums, else the atomic byte kernel (d > 4,096): both add exact
             # integers, so they give the same bits; the segments avoid colliding atomics (2x at 1M x 128).
-            if int8_stats and (accumulate_segments(codes, labels, accumulation)
+            if int8_stats and (accumulate_segments(codes, labels, accumulation, shared)
                                or accumulate_bytes(codes, labels, accumulation)):
                 continue
             if (

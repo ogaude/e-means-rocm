@@ -2292,8 +2292,16 @@ def _removal_stats_kernel(rows, order, offsets, distance, second, axes, centroid
             tl.store(axes + j * d + col, (u / norm).to(tl.float32), mask=cmask & (norm > 0))
 
 
+def _label_segments(labels, k):
+    """Label-sorted row order and per-centroid offsets: (sorted_labels, order, offsets)."""
+    dtype = torch.int16 if k < 2**15 else torch.int32  # positions run to k inclusive
+    sorted_labels, order = torch.sort(labels.to(dtype))
+    offsets = torch.searchsorted(sorted_labels, torch.arange(k + 1, device=labels.device, dtype=dtype))
+    return sorted_labels, order, offsets
+
+
 def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, removal, ema=None,
-                       statistics_rows=None, add_stats=True, decode=None):
+                       statistics_rows=None, add_stats=True, decode=None, segments_out=None):
     """Add [x | 1] to FP32 stats and [p y | d2 - d1] to removal by label (y = x - centroids,
     p = y.axes), deterministically, from label-sorted rows.
 
@@ -2306,7 +2314,10 @@ def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, r
 
     decode = (exponent, shift) (e-means-rocm): rows are INT8 or E4M3 codes, decoded in the kernel
     as Int8Quantizer / Fp8Quantizer.decode does (a 0-dim int32 exponent, a (d,) FP32 shift or
-    None); only with add_stats=False."""
+    None); only with add_stats=False.
+
+    segments_out (e-means-rocm): a list; the label sort of this call is appended as
+    (labels, sorted_labels, order, offsets), so accumulate_segments on the same labels can reuse it."""
     if statistics_rows is not None:
         rows = statistics_rows
     if not add_stats:
@@ -2328,9 +2339,9 @@ def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, r
                 or not axes.is_contiguous() or not centroids.is_contiguous())
     if not fits:
         return False
-    dtype = torch.int16 if k < 2**15 else torch.int32  # positions run to k inclusive
-    sorted_labels, order = torch.sort(labels.to(dtype))
-    offsets = torch.searchsorted(sorted_labels, torch.arange(k + 1, device=rows.device, dtype=dtype))
+    sorted_labels, order, offsets = _label_segments(labels, k)
+    if segments_out is not None:
+        segments_out.append((labels, sorted_labels, order, offsets))
     with torch.cuda.device(rows.device):
         block_d = triton.next_power_of_2(rows.shape[1])
         # Short segments are latency-bound: small programs keep more of them in flight.
@@ -2566,19 +2577,22 @@ def _segment_sums_kernel(rows, order, offsets, sorted_labels, partial, counter, 
         tl.store(out + d, tl.load(out + d) + (end - start).to(tl.float32))
 
 
-def accumulate_segments(rows, labels, stats):
+def accumulate_segments(rows, labels, stats, segments=None):
     """Add [x | 1] rows to FP32 stats by label, deterministically: rows sorted by label.
 
     Floating rows, or INT8 codes (QuantizedEmeans' exact code sums; values are read as FP32).
+    segments: an entry of accumulate_removal's segments_out; its sort is reused when it was made
+    from this very labels tensor (same object, so the same order and the same bits).
     """
     k, width = stats.shape
     if (not rows.is_cuda or stats.dtype != torch.float32
             or not (rows.dtype.is_floating_point or rows.dtype == torch.int8)
             or rows.stride(1) != 1 or stats.stride(1) != 1 or width != rows.shape[1] + 1 or width > 4097):
         return False
-    dtype = torch.int16 if k < 2**15 else torch.int32  # positions run to k inclusive
-    sorted_labels, order = torch.sort(labels.to(dtype))
-    offsets = torch.searchsorted(sorted_labels, torch.arange(k + 1, device=rows.device, dtype=dtype))
+    if segments is not None and segments[0] is labels and len(segments[2]) == len(labels):
+        _, sorted_labels, order, offsets = segments
+    else:
+        sorted_labels, order, offsets = _label_segments(labels, k)
     block_d = triton.next_power_of_2(rows.shape[1])
     # Short segments are latency-bound: small programs keep more of them in flight.
     block_r, warps = ((16, 4) if len(rows) >= 8 * k else (4, 1) if block_d <= 128
