@@ -1848,8 +1848,8 @@ def accumulate_bytes(rows, labels, stats, *, fp8_code_units=False, shift=False):
     shift subtracts 128 from UINT8 when 255*n could exceed INT32.
     Finite native FP16 remains lattice-safe.
     These lattices never reach FP32 subnormals. The caller excludes quantizers
-    and deterministic mode, except stock Int8Quantizer codes (exact integer sums,
-    decoded once per batch by QuantizedEmeans), whose order does not matter.
+    and deterministic mode, except stock Int8Quantizer codes at d > 4,096 (exact
+    integer sums, decoded once per batch by QuantizedEmeans), whose order does not matter.
     Opt-in finite E4M3 code units require a zeroed table and whole-batch n<=2**24;
     FP32 RN sums have unspecified addition order, while counts remain exact.
     """
@@ -2567,9 +2567,13 @@ def _segment_sums_kernel(rows, order, offsets, sorted_labels, partial, counter, 
 
 
 def accumulate_segments(rows, labels, stats):
-    """Add [x | 1] rows to FP32 stats by label, deterministically: rows sorted by label."""
+    """Add [x | 1] rows to FP32 stats by label, deterministically: rows sorted by label.
+
+    Floating rows, or INT8 codes (QuantizedEmeans' exact code sums; values are read as FP32).
+    """
     k, width = stats.shape
-    if (not rows.is_cuda or stats.dtype != torch.float32 or not rows.dtype.is_floating_point
+    if (not rows.is_cuda or stats.dtype != torch.float32
+            or not (rows.dtype.is_floating_point or rows.dtype == torch.int8)
             or rows.stride(1) != 1 or stats.stride(1) != 1 or width != rows.shape[1] + 1 or width > 4097):
         return False
     dtype = torch.int16 if k < 2**15 else torch.int32  # positions run to k inclusive

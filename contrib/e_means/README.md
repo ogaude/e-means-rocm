@@ -470,7 +470,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   INT8 also needs a dimension of 43,919 or less.
 - ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
   BF16 there: 1.2× to 6.9× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
-  conversion on these cards. Triton is still faster than PyTorch for native FP32 (2.0× to 2.6×
+  conversion on these cards. Triton is still faster than PyTorch for native FP32 (2.0× to 2.5×
   measured), so it stays the automatic choice.
 - ⁴ AMD support in this fork (v0.1; INT8 and FP8 in v0.2) is validated on RX 9000. On an RX
   9060 XT (gfx1200, ROCm 10.1) every precision above trains, the e-means tests pass, and Triton
@@ -490,7 +490,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   BF16's loss. With the FP8 settings tuned for RX 9000, FP8 training was 1.13× to 1.37× faster
   than BF16 in v0.2 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). Since v0.2.6,
   where cost-based revival is the default and needs each row's second-nearest distance, it runs at
-  0.63× to 0.81× of BF16's speed; `unused_threshold=0` (no revival) nearly gives back the v0.2
+  0.65× to 0.86× of BF16's speed (v0.2.7 measurements); `unused_threshold=0` (no revival) nearly gives back the v0.2
   speed (0.176 s against 0.169 s at 1M × 128), with a training objective about 0.9% higher. MI350 is compile-checked only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
@@ -498,7 +498,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   settings, and INT8 training was 1.02× to 1.37× faster than BF16 in v0.2 (200k × 64 to 4M × 128
   vectors, 1,024 to 16,384 centroids, final loss within 0.06% of BF16); since v0.2.6 (cost-based
   revival, see ⁵) it ran at 0.58× to 0.85× of BF16's speed; since v0.2.7 (exact integer code
-  sums) at 0.71× to 1.33×, the fastest format at 4M × 128, final loss within 0.06%. Elsewhere the pipeline depth is set per
+  sums) at 0.82× to 1.49×, the fastest format at 1M × 128 and 4M × 128, final loss within 0.06%. Elsewhere the pipeline depth is set per
   family so the kernel fits in 64 KiB of shared memory (upstream's setting needs up to 112 KiB
   outside MI300). MI300 is to be checked in the v0.3 cloud session; MI350 and RX 7000 are
   compile-checked only.

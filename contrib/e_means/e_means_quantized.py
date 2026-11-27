@@ -591,7 +591,7 @@ class QuantizedEmeans(Emeans):
             and self._assignment_backend in ("triton", "cute")
         )
         if native_stats or fp8_stats or int8_stats:
-            from .triton_assignment import accumulate_bytes
+            from .triton_assignment import accumulate_bytes, accumulate_segments
         sums, counts = accumulation[:, :-1], accumulation[:, -1]
         captured_labels = None if labels_out is None else labels_out[:n]
         if (
@@ -640,7 +640,10 @@ class QuantizedEmeans(Emeans):
                 codes, labels, accumulation, fp8_code_units=True
             ):
                 continue
-            if int8_stats and accumulate_bytes(codes, labels, accumulation):
+            # Label-sorted segment sums, else the atomic byte kernel (d > 4,096): both add exact
+            # integers, so they give the same bits; the segments avoid colliding atomics (2x at 1M x 128).
+            if int8_stats and (accumulate_segments(codes, labels, accumulation)
+                               or accumulate_bytes(codes, labels, accumulation)):
                 continue
             if (
                 q is not None
@@ -800,7 +803,9 @@ class QuantizedEmeans(Emeans):
         decode(c) = c * 2**-exponent + shift is affine, so a centroid's sum of decoded rows is
         2**-exponent * sum(c) + count * shift. sum(c) adds integers of magnitude <= 128; with
         whole-batch target <= 2**24 / 128 every FP32 partial sum is an exact integer, so the
-        total does not depend on addition order (atomic or not) and runs repeat bit for bit.
+        total does not depend on addition order and runs repeat bit for bit. The codes are
+        summed from label-sorted rows (accumulate_segments), or with the atomic byte kernel
+        where that cannot run (d > 4,096); both give the same bits.
         Decoding rows first and adding them with float index_add_ did depend on it.
         """
         if not self._int8_quantizer:

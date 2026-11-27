@@ -2718,6 +2718,14 @@ if cuda_supported:
         counts = torch.bincount(labels, minlength=k).double()
         torch.testing.assert_close(stats["counts"].double(), counts, rtol=0, atol=0)
         torch.testing.assert_close(stats["sums"].double(), expected, rtol=1e-6, atol=1e-4)
+        # Both code-sum paths add exact integers: label-sorted segments and the atomic byte
+        # kernel (used where segments cannot run) give the same bits.
+        from faiss.contrib.e_means.triton_assignment import accumulate_bytes, accumulate_segments
+        by_segments = torch.zeros(k, d + 1, device=rows.device)
+        by_atomics = torch.zeros_like(by_segments)
+        self.assertTrue(accumulate_segments(codes, labels, by_segments))
+        self.assertTrue(accumulate_bytes(codes, labels, by_atomics))
+        torch.testing.assert_close(by_segments, by_atomics, rtol=0, atol=0)
 
     @unittest.skipUnless(TRITON_CUDA, "Triton GPU required (NVIDIA SM80+ or AMD target family)")
     def test_triton_second_output_metadata_rejects_before_launch(self):
