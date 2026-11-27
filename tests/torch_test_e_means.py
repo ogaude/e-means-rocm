@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import os
 import unittest
 import tempfile
 import importlib.util
@@ -2720,6 +2721,42 @@ if cuda_supported:
                     runs.append((centroids.clone(), labels.clone()))
                 torch.testing.assert_close(runs[0][0], runs[1][0], rtol=0, atol=0)
                 torch.testing.assert_close(runs[0][1], runs[1][1], rtol=0, atol=0)
+
+    @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
+    def test_fast_launch_matches_triton_launch(self):
+        # e-means-rocm: _FastLaunch must pick the kernel Triton's own launch would pick (checked on
+        # every hit with EMEANS_ROCM_CHECK_FAST_LAUNCH=1) and give the same bits as with it off.
+        # The switches are read at import, so each mode runs in its own process.
+        script = (
+            "import hashlib, sys, torch\n"
+            "from faiss.contrib.e_means import triton_assignment as ta\n"
+            "from faiss.contrib.e_means.e_means_quantized import QuantizedEmeans\n"
+            "from faiss.contrib.e_means.e_means_torch import Emeans\n"
+            "from faiss.contrib.e_means.quantizer_int8 import Int8Quantizer\n"
+            "g = torch.Generator().manual_seed(7)\n"
+            "x = torch.randn(30000, 64, generator=g).cuda()\n"
+            "q = Int8Quantizer(64); q.train(x); codes = q.compute_codes(x)\n"
+            "h = hashlib.sha256()\n"
+            "for revival in (None, 0.1):\n"
+            "    for model, data in ((QuantizedEmeans(64, 64, nepochs=2, seed=3, quantizer=q,\n"
+            "                                         assignment_backend='triton', unused_threshold=revival), codes),\n"
+            "                        (Emeans(64, 64, nepochs=2, seed=3, assignment_backend='triton',\n"
+            "                                unused_threshold=revival), x)):\n"
+            "        c, labels = model.train(data)\n"
+            "        h.update(c.cpu().numpy().tobytes()); h.update(labels.cpu().numpy().tobytes())\n"
+            "print(h.hexdigest(), sum(len(f.cache) for f in ta._FAST_LAUNCHERS.values()))\n")
+        results = {}
+        for mode, env in (("fast", {}), ("checked", {"EMEANS_ROCM_CHECK_FAST_LAUNCH": "1"}),
+                          ("off", {"EMEANS_ROCM_FAST_LAUNCH": "0"})):
+            out = subprocess.run([sys.executable, "-c", script], env={**os.environ, **env},
+                                 capture_output=True, text=True, timeout=600)
+            self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+            digest, cached = out.stdout.split()[-2:]
+            results[mode] = (digest, int(cached))
+        self.assertGreater(results["fast"][1], 0)  # the fast path was used
+        self.assertEqual(results["off"][1], 0)
+        self.assertEqual(results["fast"][0], results["off"][0])
+        self.assertEqual(results["checked"][0], results["off"][0])
 
     @unittest.skipUnless(INT8_CUDA, "qualified INT8 CUDA required")
     def test_int8_code_sums_match_decoded_row_sums(self):

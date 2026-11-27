@@ -35,6 +35,127 @@ except ImportError:
 from .device_profile import nvidia_capability
 
 
+class _FastLaunch:
+    """e-means-rocm: launch a JIT kernel through its compiled handle, skipping Triton's binder.
+
+    Triton (3.8) specializes every argument on every launch: in Python, per tensor, its 16-byte
+    alignment and (AMD buffer ops) whether its storage fits 2 GiB; about 20 us per launch of the
+    revival kernels, a third of a 200k-row fit's wall time. The key here records the same facts
+    (tensor dtype, alignment, storage under 2 GiB; integer == 1, % 16, width class; every
+    constexpr and launch option), finer or equal to Triton's, so a hit can only name the kernel
+    Triton would choose. A miss (or any unhandled argument type, debug/instrumentation mode, a
+    pre-run hook) goes through the normal launch, which compiles and returns the kernel to cache.
+    EMEANS_ROCM_FAST_LAUNCH=0 turns it off; EMEANS_ROCM_CHECK_FAST_LAUNCH=1 also runs Triton's
+    own lookup on every hit and raises if it names another kernel (used by the tests).
+    """
+
+    _MAX_ENTRIES = 512
+    # Read once at import: the switches are for tests and debugging, not toggled mid-run.
+    _ENABLED = __import__("os").environ.get("EMEANS_ROCM_FAST_LAUNCH") != "0"
+    _CHECK = __import__("os").environ.get("EMEANS_ROCM_CHECK_FAST_LAUNCH") == "1"
+
+    def __init__(self, fn):
+        self.fn = fn
+        params = fn.signature.parameters
+        self.names = list(params)
+        self.index = {name: i for i, name in enumerate(self.names)}
+        self.defaults = [p.default for p in params.values()]
+        self.cache = {}
+
+    @staticmethod
+    def _spec(value):
+        if isinstance(value, torch.Tensor):
+            return (value.dtype, value.data_ptr() % 16 == 0, value.untyped_storage().size() <= _INT32_MAX)
+        if isinstance(value, bool):
+            return ("b", value)
+        if isinstance(value, int):
+            width = (0 if -2**31 <= value < 2**31 else 1 if 0 <= value < 2**63
+                     else 2 if 0 <= value < 2**64 else 3)
+            return ("i", value == 1, value % 16 == 0, width)
+        if isinstance(value, float):
+            return ("f",)
+        if value is None:
+            return ("n",)
+        raise TypeError  # constexpr values are keyed by value below
+
+    def __getitem__(self, grid):
+        return lambda *args, **kwargs: self.launch(grid, args, kwargs)
+
+    def launch(self, grid, args, kwargs):
+        fn = self.fn
+        knobs = triton.knobs
+        if (not self._ENABLED or fn.pre_run_hooks or knobs.runtime.debug
+                or kwargs.get("debug") or knobs.compilation.instrumentation_mode
+                or knobs.runtime.add_stages_inspection_hook is not None):
+            return fn.run(*args, grid=grid, warmup=False, **kwargs)
+        values = list(args) + self.defaults[len(args):]
+        options = []
+        for name, value in kwargs.items():
+            i = self.index.get(name)
+            if i is None:
+                options.append((name, value))
+            else:
+                values[i] = value
+        driver = triton.runtime.driver
+        device = driver.active.get_current_device()
+        try:
+            spec = tuple(value if p.is_constexpr else self._spec(value) for p, value in zip(fn.params, values))
+            key = (device, spec, tuple(sorted(options)))
+            kernel = self.cache.get(key)
+        except TypeError:
+            return fn.run(*args, grid=grid, warmup=False, **kwargs)
+        if kernel is None:
+            kernel = fn.run(*args, grid=grid, warmup=False, **kwargs)
+            if kernel is not None:
+                if len(self.cache) >= self._MAX_ENTRIES:
+                    self.cache.clear()
+                self.cache[key] = kernel
+            return kernel
+        if self._CHECK:
+            self._check(device, kernel, args, kwargs)
+        not_present = object()
+        for (name, _), (val, globals_dict) in fn.used_global_vals.items():
+            if globals_dict.get(name, not_present) != val:
+                return fn.run(*args, grid=grid, warmup=False, **kwargs)  # raises as Triton does
+        stream = driver.active.get_current_stream(device)
+        grid = tuple(grid)
+        g1 = grid[1] if len(grid) > 1 else 1
+        g2 = grid[2] if len(grid) > 2 else 1
+        hook = knobs.runtime.launch_enter_hook
+        launch_metadata = kernel.launch_metadata(grid, stream, *values) if hook is not None else None
+        kernel.run(grid[0], g1, g2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
+                   knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *values)
+        return kernel
+
+    def _check(self, device, kernel, args, kwargs):
+        from triton import knobs
+        from triton.runtime.jit import compute_cache_key
+        fn = self.fn
+        kwargs = dict(kwargs, debug=kwargs.get("debug", fn.debug) or knobs.runtime.debug,
+                      instrumentation_mode=knobs.compilation.instrumentation_mode)
+        kernel_cache, kernel_key_cache, _, _, binder = fn.device_caches[device]
+        _, specialization, options = binder(*args, **kwargs)
+        expected = kernel_cache.get(compute_cache_key(kernel_key_cache, specialization, options))
+        if expected is not kernel:
+            raise RuntimeError(f"fast launch of {fn.fn.__name__} chose a different compiled kernel")
+
+
+_FAST_LAUNCHERS = {}
+
+
+def _fast(fn):
+    """The cached _FastLaunch of a JIT kernel: _fast(kernel)[grid](*args, **kwargs).
+
+    Anything else (a test's mock, an already-wrapped kernel) is returned unchanged.
+    """
+    if not isinstance(fn, triton.runtime.jit.JITFunction):
+        return fn
+    launcher = _FAST_LAUNCHERS.get(fn)
+    if launcher is None:
+        launcher = _FAST_LAUNCHERS[fn] = _FastLaunch(fn)
+    return launcher
+
+
 _INT32_MAX = 2**31 - 1
 # ROCm (10.1) Triton keeps num_stages - 1 LDS copies of each streamed tile; at three
 # stages the FP16/BF16 tiles exceed the 64 KiB LDS of gfx942 (MI300X/MI325X).
@@ -1364,7 +1485,7 @@ def _resolve_pending(x, centroids, centroid_norm, labels, second_label, pending,
     # One centroid tile leaves every finite row pending. Give each row its
     # own program instead of serializing 32 dense rescans in one program.
     rows = 1 if len(centroids) <= tile else _RESOLVE_ROWS
-    _resolve_second_kernel[(triton.cdiv(b, rows),)](
+    _fast(_resolve_second_kernel)[(triton.cdiv(b, rows),)](
         x, centroids, centroid_norm, labels, second_label, pending, b, centroids.shape[0], d,
         x.stride(0), x.stride(1), centroids.stride(0), centroids.stride(1),
         TILE=tile, BLOCK_D=min(128, triton.next_power_of_2(d)), ROWS=rows, FP16=fp16,
@@ -1430,7 +1551,7 @@ def _launch_assignment(
                     centroids, [block_k // 2 if is_fp8 else block_k, block_d],
                 ),
             )
-        _assign_kernel[(triton.cdiv(b, block_b),)](
+        _fast(_assign_kernel)[(triton.cdiv(b, block_b),)](
             x,
             centroids,
             centroid_norm,
@@ -1591,7 +1712,7 @@ def prepare_int8_centroids(centroids, representation, *, validate=True):
             (k, physical_d), dtype=torch.int8, device=centroids.device
         )
         norm = torch.empty(k, dtype=torch.int32, device=centroids.device)
-        _prepare_int8_kernel[(k,)](
+        _fast(_prepare_int8_kernel)[(k,)](
             centroids,
             prepared,
             norm,
@@ -1724,7 +1845,7 @@ def assign_int8_rows(
                 x_desc=from_tensor(x, [block_b, _INT8_BLOCK_D]),
                 centroid_desc=from_tensor(centroids, [block_k, _INT8_BLOCK_D]),
             )
-        _assign_int8_kernel[(triton.cdiv(b, block_b),)](
+        _fast(_assign_int8_kernel)[(triton.cdiv(b, block_b),)](
             x,
             centroids,
             centroid_norm,
@@ -1814,7 +1935,7 @@ def _cast_fp8_centroids(source, quantizer, peak):
     width = d + (-d % 64)
     out, squares = source.new_empty((k, width), dtype=_FLOAT8_E4M3FN), source.new_empty((k, d))
     with torch.cuda.device(source.device):
-        _cast_fp8_centroids_kernel[(triton.cdiv(k * width, 2048),)](
+        _fast(_cast_fp8_centroids_kernel)[(triton.cdiv(k * width, 2048),)](
             source, out, squares, peak.view(torch.int32), source if bias is None else bias,
             k, d, width, 1.0 if quantizer is None else quantizer.scale,
             QUANTIZED=quantizer is not None, AFFINE=bias is not None,
@@ -1859,7 +1980,7 @@ def accumulate_bytes(rows, labels, stats, *, fp8_code_units=False, shift=False):
         return False
     n, d = rows.shape
     with torch.cuda.device(rows.device):
-        _byte_stats_kernel[(triton.cdiv(n * (d + 1), 512),)](
+        _fast(_byte_stats_kernel)[(triton.cdiv(n * (d + 1), 512),)](
             rows, labels, stats, n, d, rows.stride(0), labels.stride(0), stats.stride(0),
             SHIFT=shift, BLOCK=512,
         )
@@ -1966,7 +2087,7 @@ def ema_update(sums, counts, centroids, usage, alpha, decay, replace_usage):
     while block_k > 1 and triton.cdiv(k, block_k) < 2 * sms:
         block_k //= 2
     with torch.cuda.device(centroids.device):
-        _ema_update_kernel[(triton.cdiv(k, block_k),)](
+        _fast(_ema_update_kernel)[(triton.cdiv(k, block_k),)](
             sums, counts, centroids, usage, k, d, sums.stride(0), counts.stride(0),
             alpha, decay, DECAY=not replace_usage, SCALARS=isinstance(alpha, torch.Tensor),
             BLOCK_K=block_k, BLOCK_D=block_d,
@@ -2108,7 +2229,7 @@ def _write_float_splits(centroids, usage, source, target, dtype, axes=None, norm
         raise ImportError("scaled FP8 centroid splitting requires callable "
                           "triton.language.extra.cuda.libdevice.ldexp")
     with torch.cuda.device(centroids.device):
-        _write_float_splits_kernel[(len(source),)](
+        _fast(_write_float_splits_kernel)[(len(source),)](
             centroids, usage, source, target, axes, norm, centroids.shape[1],
             1.0 if quantizer is None else quantizer.scale,
             None if quantizer is None else quantizer._decode_exponent,
@@ -2352,14 +2473,14 @@ def accumulate_removal(rows, labels, stats, distance, second, axes, centroids, r
         fold = ema is not None and block_d <= 2048
         state, alpha, decay = ema if fold else (removal, 0.0, 0.0)
         scalars = isinstance(alpha, torch.Tensor)
-        _removal_stats_kernel[(k,)](
+        _fast(_removal_stats_kernel)[(k,)](
             rows, order, offsets, distance, second, axes, centroids, stats, state, rows.shape[1],
             rows.stride(0), stats.stride(0), state.stride(0), alpha, decay, BLOCK_R=block_r,
             BLOCK_D=block_d, EMA=fold, SCALARS=scalars, LONG=_LONG_SEGMENT, STATS=add_stats,
             exponent=exponent, shift=shift, DECODE=decode is not None, SHIFTED=shift is not None,
             num_warps=warps, enable_fp_fusion=False)
         pieces, partial, counter = _pieces(rows, stats, 2 * block_d + 1)
-        _long_pieces_kernel[(pieces,)](
+        _fast(_long_pieces_kernel)[(pieces,)](
             rows, order, offsets, sorted_labels, partial, counter, distance, second, axes, centroids, stats, state,
             rows.shape[1], len(rows), rows.stride(0), stats.stride(0), state.stride(0), alpha, decay,
             BLOCK_R=block_r, BLOCK_D=block_d, LONG=_LONG_SEGMENT, EMA=fold, SCALARS=scalars, STATS=add_stats,
@@ -2402,7 +2523,7 @@ def removal_update(stats, batch, axes, alpha, decay, axis_norms=None):
     block_w = triton.next_power_of_2(stats.shape[1])
     rows = max(1, 2048 // block_w)
     with torch.cuda.device(stats.device):
-        _removal_update_kernel[(triton.cdiv(len(stats), rows),)](
+        _fast(_removal_update_kernel)[(triton.cdiv(len(stats), rows),)](
             stats, batch, axes, alpha, decay, len(stats), axes.shape[1], stats.stride(0), batch.stride(0),
             ROWS=rows, BLOCK_W=block_w, SCALARS=isinstance(alpha, torch.Tensor), num_warps=4,
             axis_norms=axis_norms, enable_fp_fusion=False)
@@ -2434,7 +2555,7 @@ def removal_split(stats, axes, source, target, count):
             and stats.dtype == axes.dtype == torch.float32 and stats.shape[1] <= 8194):
         return False
     with torch.cuda.device(stats.device):
-        _removal_split_kernel[(len(source),)](
+        _fast(_removal_split_kernel)[(len(source),)](
             stats, axes, source, target, stats.shape[1], axes.shape[1], stats.stride(0),
             BLOCK_W=triton.next_power_of_2(stats.shape[1]), BLOCK_D=triton.next_power_of_2(axes.shape[1]),
             count=count, num_warps=4)
@@ -2599,7 +2720,7 @@ def accumulate_segments(rows, labels, stats, segments=None):
                       else (2, 2 if block_d <= 512 else 4))
     pieces, partial, counter = _pieces(rows, stats, block_d)
     with torch.cuda.device(rows.device):
-        _segment_sums_kernel[(pieces + k,)](
+        _fast(_segment_sums_kernel)[(pieces + k,)](
             rows, order, offsets, sorted_labels, partial, counter, stats, rows.shape[1], len(rows), pieces,
             rows.stride(0), stats.stride(0), BLOCK_R=block_r, BLOCK_D=block_d, LONG=_LONG_SEGMENT, num_warps=warps)
     torch.autograd.graph.increment_version(stats)

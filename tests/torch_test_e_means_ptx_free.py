@@ -113,7 +113,8 @@ class PtxFreeKernelsTest(unittest.TestCase):
         for kernel in ("_cast_fp8_centroids_kernel", "_ema_update_kernel",
                        "_write_float_splits_kernel", "_removal_stats_kernel",
                        "_long_pieces_kernel", "_removal_update_kernel"):
-            launch = source.split("%s[" % kernel, 1)[1].split(")\n", 1)[0]
+            # Direct launches (kernel[grid]) or through the fast launcher (_fast(kernel)[grid]).
+            launch = re.split(r"%s\)?\[" % re.escape(kernel), source, maxsplit=1)[1].split(")\n", 1)[0]
             self.assertIn("enable_fp_fusion=False", launch, kernel)
 
     def test_ema_fma_only_on_div_rn_lines(self):
