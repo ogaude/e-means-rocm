@@ -264,9 +264,10 @@ Supported data per GPU and the converters are in the kernel table of the
   reduction without atomics. Other paths (revival off at d < 128, d > 4,096, encoded rows) may
   sum with atomic additions, so repeated runs can end in different clusterings.
   Measured on the RX 9060 XT (d = 768, k = 1,024, Triton, revival on, default settings): FP32,
-  FP16, BF16 and FP8 runs are bit-identical without deterministic mode, while INT8 runs differ
-  (v0.2.5 was bit-identical only for FP16 and FP8). Revival off, d < 128 and d > 4,096 are not
-  measured.
+  FP16, BF16 and FP8 runs are bit-identical without deterministic mode (v0.2.5: only FP16 and
+  FP8). INT8 runs differ in v0.2.6; on `main`, a stock `Int8Quantizer` sums its integer codes
+  exactly and decodes once per batch, so INT8 repeats bit for bit too (and trains 1.19× to
+  1.56× faster at 1M to 4M rows). Revival off, d < 128 and d > 4,096 are not measured.
   `torch.use_deterministic_algorithms(True)` makes runs identical on every path measured,
   including INT8.
 

@@ -184,6 +184,7 @@ class QuantizedEmeans(Emeans):
         self._input_dtype = quantizer.dtype if quantizer is not None else None
         self._fp8_peak = None
         self._batch_code_units = False
+        self._batch_int8_codes = False
         self._batch_operand = self._stats_operand = None
         self._centered_cast = getattr(quantizer, "center", False)
         self._cast_fit_token = None
@@ -316,6 +317,7 @@ class QuantizedEmeans(Emeans):
     def _capture_operations_match(self, owner=None):
         return (super()._capture_operations_match(QuantizedEmeans)
                 and _same_operation(self._use_code_units, QuantizedEmeans._use_code_units, self)
+                and _same_operation(self._use_int8_code_sums, QuantizedEmeans._use_int8_code_sums, self)
                 and _same_operation(self._check_cast_fit, QuantizedEmeans._check_cast_fit, self))
 
     def _chunked_capture_matches(self, owner=None):
@@ -325,6 +327,7 @@ class QuantizedEmeans(Emeans):
         super()._finish_step(expected_n)
         self._batch_operand = None
         self._batch_code_units = False
+        self._batch_int8_codes = False
 
     def finalize(self):
         self._check_cast_fit()
@@ -525,6 +528,8 @@ class QuantizedEmeans(Emeans):
         if pending_n == 0:
             # Choose code units for the complete logical contribution.
             self._batch_code_units = self._use_code_units(n, bound)
+            self._batch_int8_codes = (not self._batch_code_units and not wide
+                                      and self._use_int8_code_sums(n, bound))
             if borrowed:
                 # A complete private replay borrows the batch's INT32 view.
                 accumulation = self._batch_stats.view(torch.int32)[
@@ -578,7 +583,14 @@ class QuantizedEmeans(Emeans):
             code_units
             and not torch.are_deterministic_algorithms_enabled()
         )
-        if native_stats or fp8_stats:
+        int8_codes = self._batch_int8_codes
+        # Exact integer sums: the atomic kernel is order-independent here, deterministic mode too.
+        int8_stats = (
+            int8_codes
+            and self._centroids.is_cuda
+            and self._assignment_backend in ("triton", "cute")
+        )
+        if native_stats or fp8_stats or int8_stats:
             from .triton_assignment import accumulate_bytes
         sums, counts = accumulation[:, :-1], accumulation[:, -1]
         captured_labels = None if labels_out is None else labels_out[:n]
@@ -628,6 +640,23 @@ class QuantizedEmeans(Emeans):
                 codes, labels, accumulation, fp8_code_units=True
             ):
                 continue
+            if int8_stats and accumulate_bytes(codes, labels, accumulation):
+                continue
+            if (
+                q is not None
+                and not (code_units or int8_codes)
+                and accumulation.dtype == torch.float32
+                and rows.is_cuda
+                and self._assignment_backend == "triton"
+                and not torch.are_deterministic_algorithms_enabled()
+            ):
+                # e-means-rocm: decoded rows summed from label-sorted rows, no atomics, so
+                # runs repeat bit for bit (float index_add_ adds in arrival order).
+                from .triton_assignment import accumulate_segments
+
+                decoded = statistics_values(rows, codes, q).float().contiguous()
+                if accumulate_segments(decoded, labels, accumulation):
+                    continue
             if operand is None:
                 if self._stats_operand is None:
                     with torch.inference_mode(
@@ -652,7 +681,7 @@ class QuantizedEmeans(Emeans):
                 and rows.dtype is torch.bfloat16
                 and values.dtype is torch.float32
             )
-            represented = statistics_values(rows, codes, q, code_units=code_units)
+            represented = statistics_values(rows, codes, q, code_units=code_units or int8_codes)
             values[:, :-1].copy_(
                 represented
                 if integer_stats or code_units or direct_bf16
@@ -665,6 +694,9 @@ class QuantizedEmeans(Emeans):
         total_n = pending_n + n
         if total_n == target and code_units:
             sums.mul_(2.0**-q.exponent)
+        if total_n == target and int8_codes:
+            # Exact integer code sums -> decoded sums: sum(c) * 2**-e + count * shift.
+            sums.mul_(2.0**-q.exponent).addcmul_(counts[:, None], q.shift[None, :])
         if (
             total_n == target
             and integer_stats
@@ -760,6 +792,34 @@ class QuantizedEmeans(Emeans):
                 name in vars(q) for name in ("decode", "compute_codes")
             )
             and not torch.are_deterministic_algorithms_enabled()
+        )
+
+    def _use_int8_code_sums(self, n, target):
+        """e-means-rocm: sum stock Int8Quantizer codes per centroid, decode once per batch.
+
+        decode(c) = c * 2**-exponent + shift is affine, so a centroid's sum of decoded rows is
+        2**-exponent * sum(c) + count * shift. sum(c) adds integers of magnitude <= 128; with
+        whole-batch target <= 2**24 / 128 every FP32 partial sum is an exact integer, so the
+        total does not depend on addition order (atomic or not) and runs repeat bit for bit.
+        Decoding rows first and adding them with float index_add_ did depend on it.
+        """
+        if not self._int8_quantizer:
+            return False
+        from .quantizer_int8 import Int8Quantizer
+
+        q = self.quantizer
+        return (
+            n > 0
+            and target <= _FLOAT32_COUNT_LIMIT // 128
+            and type(q) is Int8Quantizer
+            and q.dtype is torch.int8
+            and isinstance(q.shift, torch.Tensor)
+            and -100 <= q.exponent <= 100
+            and _same_operation(q.decode, Int8Quantizer.decode, q)
+            and not any(
+                name in vars(q) for name in ("decode", "compute_codes")
+            )
+            and self._batch_stats.dtype == torch.float32
         )
 
     def _prepare_input(self, x):
