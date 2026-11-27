@@ -2748,7 +2748,9 @@ if cuda_supported:
         results = {}
         for mode, env in (("fast", {}), ("checked", {"EMEANS_ROCM_CHECK_FAST_LAUNCH": "1"}),
                           ("off", {"EMEANS_ROCM_FAST_LAUNCH": "0"})):
-            out = subprocess.run([sys.executable, "-c", script], env={**os.environ, **env},
+            base = {name: value for name, value in os.environ.items()
+                    if name not in ("EMEANS_ROCM_FAST_LAUNCH", "EMEANS_ROCM_CHECK_FAST_LAUNCH")}
+            out = subprocess.run([sys.executable, "-c", script], env={**base, **env},
                                  capture_output=True, text=True, timeout=600)
             self.assertEqual(out.returncode, 0, out.stderr[-2000:])
             digest, cached = out.stdout.split()[-2:]

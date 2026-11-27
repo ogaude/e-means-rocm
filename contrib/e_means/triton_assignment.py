@@ -47,12 +47,37 @@ class _FastLaunch:
     pre-run hook) goes through the normal launch, which compiles and returns the kernel to cache.
     EMEANS_ROCM_FAST_LAUNCH=0 turns it off; EMEANS_ROCM_CHECK_FAST_LAUNCH=1 also runs Triton's
     own lookup on every hit and raises if it names another kernel (used by the tests).
+
+    It copies private Triton internals, so it runs only where they were verified: a ROCm (HIP)
+    torch with Triton 3.8.x and every attribute it reads present. Elsewhere, NVIDIA included,
+    every launch is Triton's own.
     """
 
     _MAX_ENTRIES = 512
     # Read once at import: the switches are for tests and debugging, not toggled mid-run.
     _ENABLED = __import__("os").environ.get("EMEANS_ROCM_FAST_LAUNCH") != "0"
     _CHECK = __import__("os").environ.get("EMEANS_ROCM_CHECK_FAST_LAUNCH") == "1"
+    _VERIFIED_TRITON = ("3.8.",)
+    _supported = None  # decided on first launch: _verified()
+
+    @classmethod
+    def _verified(cls):
+        if cls._supported is None:
+            try:
+                from triton.compiler.compiler import CompiledKernel
+                from triton.runtime.jit import JITFunction, compute_cache_key  # noqa: F401
+                knobs = triton.knobs
+                cls._supported = bool(
+                    torch.version.hip is not None
+                    and triton.__version__.startswith(cls._VERIFIED_TRITON)
+                    and hasattr(knobs.runtime, "add_stages_inspection_hook")
+                    and hasattr(knobs.runtime, "launch_enter_hook") and hasattr(knobs.runtime, "launch_exit_hook")
+                    and hasattr(knobs.compilation, "instrumentation_mode")
+                    and hasattr(CompiledKernel, "launch_metadata") and hasattr(CompiledKernel, "run")
+                    and hasattr(JITFunction, "run") and hasattr(triton.runtime, "driver"))
+            except Exception:
+                cls._supported = False
+        return cls._supported
 
     def __init__(self, fn):
         self.fn = fn
@@ -83,8 +108,10 @@ class _FastLaunch:
 
     def launch(self, grid, args, kwargs):
         fn = self.fn
+        if not (self._ENABLED and self._verified()) or callable(grid):
+            return fn.run(*args, grid=grid, warmup=False, **kwargs)
         knobs = triton.knobs
-        if (not self._ENABLED or fn.pre_run_hooks or knobs.runtime.debug
+        if (fn.pre_run_hooks or knobs.runtime.debug
                 or kwargs.get("debug") or knobs.compilation.instrumentation_mode
                 or knobs.runtime.add_stages_inspection_hook is not None):
             return fn.run(*args, grid=grid, warmup=False, **kwargs)
@@ -94,6 +121,8 @@ class _FastLaunch:
             i = self.index.get(name)
             if i is None:
                 options.append((name, value))
+            elif i < len(args):  # given twice: let Triton raise its TypeError
+                return fn.run(*args, grid=grid, warmup=False, **kwargs)
             else:
                 values[i] = value
         driver = triton.runtime.driver
@@ -121,8 +150,7 @@ class _FastLaunch:
         grid = tuple(grid)
         g1 = grid[1] if len(grid) > 1 else 1
         g2 = grid[2] if len(grid) > 2 else 1
-        hook = knobs.runtime.launch_enter_hook
-        launch_metadata = kernel.launch_metadata(grid, stream, *values) if hook is not None else None
+        launch_metadata = kernel.launch_metadata(grid, stream, *values)  # as JITFunction.run
         kernel.run(grid[0], g1, g2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
                    knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *values)
         return kernel
@@ -2710,7 +2738,8 @@ def accumulate_segments(rows, labels, stats, segments=None):
             or not (rows.dtype.is_floating_point or rows.dtype == torch.int8)
             or rows.stride(1) != 1 or stats.stride(1) != 1 or width != rows.shape[1] + 1 or width > 4097):
         return False
-    if segments is not None and segments[0] is labels and len(segments[2]) == len(labels):
+    if (segments is not None and segments[0] is labels and len(segments[2]) == len(labels)
+            and len(segments[3]) == k + 1):
         _, sorted_labels, order, offsets = segments
     else:
         sorted_labels, order, offsets = _label_segments(labels, k)

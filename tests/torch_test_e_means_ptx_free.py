@@ -13,6 +13,7 @@
 
 import re
 import unittest
+from unittest import mock
 from collections import Counter
 
 try:
@@ -242,3 +243,33 @@ class PtxFreeKernelsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_TRITON, "triton is not available")
+class FastLaunchGateTest(unittest.TestCase):
+    """e-means-rocm: _FastLaunch only bypasses Triton's launch on a verified stack."""
+
+    def _verified(self, hip, version):
+        saved = ta._FastLaunch._supported
+        try:
+            ta._FastLaunch._supported = None
+            with mock.patch.object(ta.torch.version, "hip", hip), \
+                 mock.patch.object(ta.triton, "__version__", version):
+                return ta._FastLaunch._verified()
+        finally:
+            ta._FastLaunch._supported = saved
+
+    def test_gate(self):
+        self.assertFalse(self._verified(None, "3.8.0"))  # CUDA (or CPU) torch: Triton's own launch
+        self.assertFalse(self._verified("10.1", "3.9.0"))  # unverified Triton
+        self.assertFalse(self._verified("10.1", "3.7.1"))
+        if ta.triton.__version__.startswith("3.8."):
+            self.assertTrue(self._verified("10.1", ta.triton.__version__))
+
+    def test_unverified_stack_uses_triton_launch(self):
+        kernel = mock.MagicMock(spec=ta.triton.runtime.jit.JITFunction)
+        kernel.signature = __import__("inspect").signature(lambda a, b=2: None)
+        launcher = ta._FastLaunch(kernel)
+        with mock.patch.object(ta._FastLaunch, "_verified", return_value=False):
+            launcher[(4,)](1, b=3)
+        kernel.run.assert_called_once_with(1, grid=(4,), warmup=False, b=3)
