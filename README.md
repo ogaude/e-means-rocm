@@ -4,13 +4,13 @@ AMD GPU (ROCm) support for [e-means](https://github.com/ogaude/e-means-rocm/blob
 faiss `contrib/e_means`. The goal is that `Emeans(d, k).train(x)` runs on AMD GPUs through the
 fast Triton kernels, as it does on NVIDIA, with NVIDIA results unchanged.
 
-> **Status: v0.2.8 released (tag `e-means-rocm-v0.2.8`) for RX 9000 (gfx1200), installable with
+> **Status: v0.2.9 released (tag `e-means-rocm-v0.2.9`) for RX 9000 (gfx1200), installable with
 > `pip install emeans-rocm`; synced with upstream faiss `b14b3d69`. MI300X follows in v0.3.**
 > On an RX 9060 XT (gfx1200, ROCm 10.1) the default `Emeans(d, k).train(x)` uses Triton, every
 > data format trains (FP32, FP16, BF16; INT8/UINT8 and FP8 through `QuantizedEmeans`), the whole e-means test suite passes,
-> and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.3× to 15× faster than
+> and the rewritten kernels match PyTorch bit for bit in the numerics tests. Triton is 2.7× to 15× faster than
 > PyTorch for BF16; FP16 is the fastest format here at 200k rows and INT8 at 1M and 4M rows
-> (INT8 trains at 0.89× to 1.50× of BF16's speed, FP8 at 0.96× to 1.24× since v0.2.8; see Results). MI300X
+> (INT8 trains at 0.91× to 1.60× of BF16's speed, FP8 at 0.90× to 1.30×; see Results). MI300X
 > (gfx942) is planned for v0.3; MI350 (gfx950) and RX 7000 (gfx11xx) are compile-checked only.
 > **NVIDIA has not been re-run on hardware** (see Known limitations).
 
@@ -98,7 +98,7 @@ PyTorch, which upstream already supports.
 ## Results on RX 9000 (gfx1200)
 
 Measured on an RX 9060 XT (16 GB), ROCm 10.1, torch 2.14.0+rocm10.1.0, triton 3.8.0, on
-2026-11-27 (v0.2.8: upstream faiss `b14b3d69`, with cost-based cluster revival as the
+2026-11-28 (v0.2.9: upstream faiss `b14b3d69`, with cost-based cluster revival as the
 default; Triton rows best of three rounds, PyTorch rows one round). Times are warm `train()` runs of 3 epochs on random FP32 data, converted to each format:
 BF16 and FP16 by the default path during training, INT8 and FP8 by a calibrated quantizer before
 timing (encoding not timed, as when data is stored encoded). "PyTorch" is
@@ -107,22 +107,22 @@ computed from the unrounded times.
 
 | Data format | 200k × 64, 1,024 centroids | 1M × 128, 4,096 centroids | 4M × 128, 16,384 centroids |
 |---|---|---|---|
-| BF16, Triton (the default for FP32 input) | 0.038 s | 0.137 s | 1.147 s |
-| BF16, PyTorch | 0.089 s | 1.331 s | 17.209 s |
-| FP16, Triton | **0.031 s** | 0.118 s | 1.166 s |
-| FP16, PyTorch | 0.090 s | 1.380 s | 16.841 s |
-| Native FP32, Triton | 0.043 s | 0.555 s | 7.896 s |
-| Native FP32, PyTorch | 0.092 s | 1.363 s | 15.710 s |
-| INT8, Triton | 0.043 s | **0.092 s** | **0.854 s** |
-| FP8, Triton | 0.040 s | 0.111 s | 0.946 s |
+| BF16, Triton (the default for FP32 input) | 0.033 s | 0.134 s | 1.149 s |
+| BF16, PyTorch | 0.088 s | 1.335 s | 17.211 s |
+| FP16, Triton | **0.029 s** | 0.118 s | 1.162 s |
+| FP16, PyTorch | 0.089 s | 1.304 s | 16.776 s |
+| Native FP32, Triton | 0.047 s | 0.559 s | 7.918 s |
+| Native FP32, PyTorch | 0.093 s | 1.245 s | 15.762 s |
+| INT8, Triton | 0.036 s | **0.084 s** | **0.855 s** |
+| FP8, Triton | 0.036 s | 0.103 s | 0.949 s |
 
 | Speed-up | 200k × 64 | 1M × 128 | 4M × 128 |
 |---|---|---|---|
-| Triton over PyTorch, BF16 | 2.3× | 9.7× | 15.0× |
-| Triton over PyTorch, FP16 | 2.9× | 11.7× | 14.4× |
-| Triton over PyTorch, FP32 | 2.1× | 2.5× | 2.0× |
-| INT8 over BF16 (Triton) | 0.89× | 1.50× | 1.34× |
-| FP8 over BF16 (Triton) | 0.96× | 1.24× | 1.21× |
+| Triton over PyTorch, BF16 | 2.7× | 10.0× | 15.0× |
+| Triton over PyTorch, FP16 | 3.1× | 11.1× | 14.4× |
+| Triton over PyTorch, FP32 | 2.0× | 2.2× | 2.0× |
+| INT8 over BF16 (Triton) | 0.91× | 1.60× | 1.34× |
+| FP8 over BF16 (Triton) | 0.90× | 1.30× | 1.21× |
 
 Final losses: FP16 and FP32 within 0.01% of BF16, INT8 within 0.06%, FP8 within 0.08%.
 
@@ -152,12 +152,23 @@ rows instead of with the atomic byte kernel, which took half of an FP8 fit's GPU
 1.20× faster than v0.2.5 there; at 200k × 64 it runs at 1.04× of v0.2.7 and 0.63× of v0.2.5.
 Results are unchanged bit for bit (all Triton formats at the three shapes against v0.2.7).
 
-**Small shapes.** At 200k × 64 every format stays slower than v0.2.5 (BF16 0.74×, INT8 0.65×,
+**v0.2.8, small shapes.** At 200k × 64 every format stayed slower than v0.2.5 (BF16 0.74×, INT8 0.65×,
 FP8 0.63×) although its GPU kernel time is the same or lower: cost-based revival launches about
 twice as many small kernels (3,700 to 4,100 per 3-epoch fit against 1,600 to 2,000), and at that
-size the GPU waits on the host. (BF16 at 200k × 64 is noisy from round to round: 0.038 to 0.070 s
-in this run, 0.036 s in v0.2.7's; its code did not change.) With revival off (`unused_threshold=0`) all three train
+size the GPU waits on the host. (BF16 at 200k × 64 was noisy from round to round: 0.038 to 0.070 s
+in v0.2.8's run, 0.036 s in v0.2.7's; its code did not change.) With revival off (`unused_threshold=0`) all three trained
 at v0.2.5's speed (25 to 26 ms against 25 to 28 ms for a 3-epoch fit).
+
+**v0.2.9, small shapes.** Two host-side changes, results bit-identical: INT8/FP8 sort each chunk's
+labels once instead of twice (20% to 22% fewer kernel launches per fit: 4,069 to 3,253 for INT8,
+3,737 to 2,921 for FP8), and the per-step Triton kernels launch through their cached compiled
+kernel (inside a 200k-row fit, under a per-launch timer, 22-23 µs to 16-17 µs per launch: 3.4 ms
+(INT8) and 2.0 ms (BF16) less launch time per fit; ROCm with Triton 3.8 only). Against v0.2.8 in the same session:
+INT8 1.13×, FP8 1.17× and BF16 1.13× at 200k × 64; INT8 1.11× and FP8 1.08× at 1M × 128; 1.00×
+to 1.01× at 4M × 128. At 200k × 64, BF16, INT8 and FP8 are still slower than v0.2.5 (0.86×,
+0.78×, 0.69×); the rest is probably per-step host work in cost-based revival (a hypothesis; see
+the v0.2.9 release history).
+
 
 ### What the RDNA4 tuning gains
 
@@ -187,7 +198,7 @@ The split-K choice (below) does not affect training, whose batches are large.
 
 ### Findings
 
-- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 1.1× to
+- **Keep BF16 on RX cards.** RDNA has no FP32 matrix instruction, so native FP32 costs 1.4× to
   6.9× the time of BF16 here, more as the problem grows. Triton is still the faster FP32 path,
   so it stays the automatic choice. INT8 (since v0.2.7) and FP8 (since v0.2.8) are faster than
   BF16 at 1M and 4M rows; in v0.2.6 both were slower (next finding but one).
@@ -277,6 +288,11 @@ Supported data per GPU and the converters are in the kernel table of the
   kernels; the bit-level numerics tests have only run on AMD.
 - **Several GPUs** (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are
   untested until v0.5; their tests stay skipped on ROCm.
+- **Fast kernel launch is verified on ROCm with Triton 3.8.x only** (v0.2.9). There the per-step
+  Triton kernels skip Triton's per-launch argument specialization (7.4 µs instead of 9.1 µs per
+  launch in a tight loop, same compiled kernels, same results); a non-ROCm torch (NVIDIA included) or any other
+  Triton version uses Triton's own launch. `EMEANS_ROCM_FAST_LAUNCH=0` turns it off and
+  `EMEANS_ROCM_CHECK_FAST_LAUNCH=1` checks every launch against Triton's own lookup.
 - **Training is not always bit-reproducible by default**, on AMD as upstream on NVIDIA. Since the
   upstream b14b3d69 sync, with the Triton backend and cluster revival on (the default, cost-based or
   mass-based), floating-point batch sums are added from label-sorted rows without atomics, up to
@@ -408,6 +424,7 @@ and the way the fork was installed.
 | **v0.2.6** | Synced with upstream faiss `b14b3d69` (cost-based revival by default, fractional epochs, BF16 IVF training and two-nearest IVF search); ROCm work for the new code; INT8/FP8 revival speed; CPU path on faiss-cpu 1.16.0 | **released** 2026-11-26 |
 | **v0.2.7** | INT8 training repeats bit for bit and is 1.58× to 2.51× faster at 1M to 4M rows (exact integer code sums from label-sorted rows); determinism measured on AMD | **released** 2026-11-27 |
 | **v0.2.8** | FP8 training 1.48× to 1.91× faster at 1M to 4M rows (code-unit sums from label-sorted rows), results unchanged | **released** 2026-11-27 |
+| **v0.2.9** | Small shapes: INT8/FP8 1.08× to 1.17× faster at 200k and 1M rows, BF16 1.13× at 200k (one label sort per chunk, fast kernel launch on ROCm), results unchanged | **released** 2026-11-28 |
 
 Not scheduled on either track:
 
@@ -428,6 +445,32 @@ Not scheduled on either track:
 | MI350 (gfx950), if the cloud offers one | measure its LDS limit and lift or keep the 64 KiB cap (see Known limitations) |
 
 ### Release history
+
+**v0.2.9 (2026-11-28, tag `e-means-rocm-v0.2.9`)**: small shapes, host side.
+*Changes.* On the INT8/FP8 path, each chunk sorts its labels once, for the revival statistics
+and the batch sums, instead of twice. The per-step Triton kernels launch through their cached
+compiled kernel on ROCm with Triton 3.8.x (`EMEANS_ROCM_FAST_LAUNCH=0` turns it off).
+*Results* (RX 9060 XT, 3-epoch warm fits, best of three rounds, v0.2.8 run in the same session):
+INT8 1.13×, FP8 1.17×, BF16 1.13× and FP16 1.09× faster at 200k × 64; INT8 1.11× and FP8 1.08×
+at 1M × 128; 0.99× to 1.02× otherwise, except FP32 at 200k × 64 (0.94×, noise; see Issues).
+Inside a 200k-row fit, under a per-launch timer, a Triton launch costs 22-23 µs and a fast launch
+16-17 µs: 3.4 ms (INT8) and 2.0 ms (BF16) less launch time per fit. Bit-identical to v0.2.8: final objectives of every Triton
+format at the three bench shapes (3 + 3 rounds), every determinism-matrix hash (32
+configurations) and the centroid hashes of BF16/INT8/FP8 at 200k × 64 and 1M × 128.
+*Hypotheses.* The remaining gap to v0.2.5 at 200k × 64 (BF16 0.86×, INT8 0.78×, FP8 0.69×) is
+per-step host work in cost-based revival: kernel launches and small PyTorch ops, measured as
+counts and profiles, not removed one by one. The per-launch saving inside a fit (5.0 to 6.4 µs) is
+larger than in a tight loop (1.7 µs); assumed causes: the kernels in a fit have up to 29
+parameters (21 specialized) against the micro-benchmark kernel's 13 (10), and CPU caches are
+colder. BF16's 1.13× at 200k × 64 is about twice its measured launch saving; part of it is
+probably v0.2.8's noisy BF16 rounds at that shape (0.066, 0.038, 0.037 s). Most of the remaining host time is assumed to be
+PyTorch op dispatch (op counts and a cProfile).
+*Issues.* Fast launch is verified on Triton 3.8.x only; other versions fall back (backlog 999.4).
+NVIDIA paths are not run on hardware (999.3); the fast path is off there. Small shapes remain
+slower than v0.2.5 (999.2). FP32 at 200k × 64 was noisy in both versions (0.047 to 0.094 s
+and 0.044 to 0.186 s per round), so its 0.94× is not a measured regression. Tests: 391 passed
+and 88 skipped on gfx1200 (395 with graph replay; 391 with every launch checked against
+Triton's lookup; 293 with the GPU hidden).
 
 **v0.2.8 (2026-11-27, tag `e-means-rocm-v0.2.8`)**: FP8 batch sums from label-sorted rows. A stock
 `Fp8Quantizer` adds its E4M3 code units per centroid from label-sorted rows (no atomics, fixed

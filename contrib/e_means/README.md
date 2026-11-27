@@ -469,13 +469,13 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - FP8 and INT8 data are used as raw codes in their own units, unless you pass the matching converter.
   INT8 also needs a dimension of 43,919 or less.
 - ³ RX 7000 and RX 9000 GPUs have no FP32 matrix instruction, so native FP32 is much slower than
-  BF16 there: 1.1× to 6.9× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
-  conversion on these cards. Triton is still faster than PyTorch for native FP32 (2.0× to 2.5×
+  BF16 there: 1.4× to 6.9× on an RX 9060 XT (200k × 64 to 4M × 128 vectors). Keep the default BF16
+  conversion on these cards. Triton is still faster than PyTorch for native FP32 (2.0× to 2.2×
   measured), so it stays the automatic choice.
 - ⁴ AMD support in this fork (v0.1; INT8 and FP8 in v0.2) is validated on RX 9000. On an RX
   9060 XT (gfx1200, ROCm 10.1) every precision above trains, the e-means tests pass, and Triton
-  is 2.3× to 15× faster than PyTorch for BF16 and 2.9× to 14× for FP16 (200k × 64 to
-  4M × 128 vectors, more as the problem grows; v0.2.8). RX 9000 GPUs use tile settings tuned for
+  is 2.7× to 15× faster than PyTorch for BF16 and 3.1× to 14× for FP16 (200k × 64 to
+  4M × 128 vectors, more as the problem grows; v0.2.9). RX 9000 GPUs use tile settings tuned for
   them, which make the BF16/FP16 assignment kernel up to 3.5× faster and BF16 training up to 2.1×
   faster than the NVIDIA-fitted defaults (INT8 and FP8: see ⁵ and ⁶). MI300 validation and
   tuning are planned for v0.3; MI350 and RX 7000 are compile-checked only and use the
@@ -491,16 +491,16 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   than BF16 in v0.2 (200k × 64 to 4M × 128 vectors, 1,024 to 16,384 centroids). Since v0.2.6,
   where cost-based revival is the default and needs each row's second-nearest distance, it ran at
   0.65× to 0.86× of BF16's speed in v0.2.7; since v0.2.8 (code-unit sums from label-sorted rows) at
-  0.96× to 1.24×. In v0.2.6, `unused_threshold=0` (no revival) nearly gave back the v0.2
+  0.90× to 1.30× (v0.2.9 run). In v0.2.6, `unused_threshold=0` (no revival) nearly gave back the v0.2
   speed (0.176 s against 0.169 s at 1M × 128), with a training objective about 0.9% higher;
-  v0.2.8 with revival on is faster than both (0.111 s). MI350 is compile-checked only and uses the NVIDIA-fitted settings.
+  v0.2.8 with revival on was faster than both (0.111 s; v0.2.9: 0.103 s). MI350 is compile-checked only and uses the NVIDIA-fitted settings.
 - ⁶ INT8 on AMD (v0.2) runs on the integer matrix instructions of all four families. On an RX
   9060 XT it trains, the INT8 tests pass and distances are exact. With the INT8 settings tuned for
   RX 9000, the INT8 assignment kernel is 2.6× to 10× faster than with the NVIDIA-fitted
   settings, and INT8 training was 1.02× to 1.37× faster than BF16 in v0.2 (200k × 64 to 4M × 128
   vectors, 1,024 to 16,384 centroids, final loss within 0.06% of BF16); since v0.2.6 (cost-based
   revival, see ⁵) it ran at 0.58× to 0.85× of BF16's speed; since v0.2.7 (exact integer code
-  sums) at 0.89× to 1.50× (v0.2.8 run), the fastest format at 1M × 128 and 4M × 128, final loss within 0.06%. Elsewhere the pipeline depth is set per
+  sums) at 0.91× to 1.60× (v0.2.9 run), the fastest format at 1M × 128 and 4M × 128, final loss within 0.06%. Elsewhere the pipeline depth is set per
   family so the kernel fits in 64 KiB of shared memory (upstream's setting needs up to 112 KiB
   outside MI300). MI300 is to be checked in the v0.3 cloud session; MI350 and RX 7000 are
   compile-checked only.
@@ -514,6 +514,14 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
 - Training uses the plain (eager) loop on AMD, not CUDA-graph replay. Results are the same, only
   speed differs. Replay works on the RX 9060 XT but gave no measurable speed-up there, so it is
   opt-in: set `EMEANS_ROCM_GRAPH_REPLAY=1`.
+- Fast kernel launch (v0.2.9): on ROCm with Triton 3.8.x, the per-step Triton kernels are
+  launched through their cached compiled kernel instead of Triton's per-launch argument
+  specialization (7.4 µs instead of 9.1 µs per launch in a tight loop, 16-17 µs instead of
+  22-23 µs inside a 200k-row fit). The key it uses is equal to or finer than
+  Triton's, so it picks the kernel Triton would; results are the same. A non-ROCm torch (NVIDIA
+  included) or any other Triton version uses Triton's own launch. `EMEANS_ROCM_FAST_LAUNCH=0` turns it off;
+  `EMEANS_ROCM_CHECK_FAST_LAUNCH=1` also runs Triton's lookup on every launch and raises on a
+  mismatch (slow; for testing).
 - Determinism: with the Triton backend and cluster revival on (the default, cost-based or
   mass-based), floating-point batch sums are added from label-sorted rows without atomics, up to
   d = 4,096 and batches of 2^24 rows; with revival off (`unused_threshold=0`), FP32/BF16 sums at d ≥ 128 use a segmented
@@ -527,7 +535,7 @@ Which implementation your run will use (CuTe, Triton, PyTorch) is automatically 
   d < 128 and d > 4,096 are not measured.
   For identical runs on every path, call `torch.use_deterministic_algorithms(True)`.
 - `assignment_backend="native"` (PyTorch) handles FP32, FP16 and BF16 on the four families, as on
-  NVIDIA SM80+; it is verified on gfx1200 and 2.3× to 15× slower than Triton for FP16/BF16,
+  NVIDIA SM80+; it is verified on gfx1200 and 2.7× to 15× slower than Triton for FP16/BF16,
   more as the problem grows.
 - Several GPUs (`DistributedEmeans`, sharded centroids) are expected to work on AMD but are untested.
 
