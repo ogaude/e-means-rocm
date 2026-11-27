@@ -262,10 +262,13 @@ Supported data per GPU and the converters are in the kernel table of the
   mass-based), floating-point batch sums are added from label-sorted rows without atomics, up to
   d = 4,096 and batches of 2^24 rows; with revival off (`unused_threshold=0`), FP32/BF16 sums at d ≥ 128 use a segmented
   reduction without atomics. Other paths (revival off at d < 128, d > 4,096, encoded rows) may
-  sum with atomic additions, so repeated runs can end in different clusterings. None of this is
-  measured on AMD yet.
-  `torch.use_deterministic_algorithms(True)` makes runs identical, eager and with graph replay
-  (verified before the sync).
+  sum with atomic additions, so repeated runs can end in different clusterings.
+  Measured on the RX 9060 XT (d = 768, k = 1,024, Triton, revival on, default settings): FP32,
+  FP16, BF16 and FP8 runs are bit-identical without deterministic mode, while INT8 runs differ
+  (v0.2.5 was bit-identical only for FP16 and FP8). Revival off, d < 128 and d > 4,096 are not
+  measured.
+  `torch.use_deterministic_algorithms(True)` makes runs identical on every path measured,
+  including INT8.
 
 ## Development
 
